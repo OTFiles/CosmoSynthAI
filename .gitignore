@@ -1,0 +1,10 @@
+config.txt
+api-config.txt
+config.json
+chat_history/*
+__pycache__/*
+physics.txt
+sessions/*
+logs/*
+history.json
+system_state.json
