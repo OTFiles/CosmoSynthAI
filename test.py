@@ -1,5 +1,15 @@
 # 其他程序中调用示例
-from chat_core import load_configs, run_chat_session, attach_file, save_session, load_session
+from chat_core import (
+    load_configs, 
+    run_chat_session, 
+    attach_file, 
+    save_session, 
+    load_session,
+    APIConnectionError,    # 新增
+    APIResponseError,       # 新增
+    FileTooLargeError,      # 新增
+    ConfigLoadError         # 新增
+)
 
 # 可以设置日志级别（可选）
 import logging
@@ -29,7 +39,7 @@ except FileTooLargeError as e:
 
 # 运行会话 (使用第一个配置)
 try:
-    updated_session, ai_reply = run_chat_session(configs, session, 0)
+    updated_session, ai_reply = run_chat_session(configs, session, 1)
     
     # 保存会话
     save_session(updated_session, "quantum_chat.json")

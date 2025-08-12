@@ -79,17 +79,18 @@ def _log_ai_output(config, content, is_streaming=True):
         # 获取带毫秒的时间戳
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
         
-        # 构建日志条目
-        entry = {
-            "timestamp": timestamp,
-            "model": config.model,
-            "provider": config.name,
-            "content": content,
-            "streaming": is_streaming
-        }
-        
-        # 写入日志
-        _write_ai_log(entry)
+        if content:
+            # 构建日志条目
+            entry = {
+                "timestamp": timestamp,
+                "model": config.model,
+                "provider": config.name,
+                "content": content,
+                "streaming": is_streaming
+            }
+            
+            # 写入日志
+            _write_ai_log(entry)
         
     except Exception as e:
         logger.error(f"创建AI日志条目失败: {str(e)}")
@@ -289,7 +290,6 @@ def _embed_file_content(content):
     return content
 
 def _send_openai_request(config, messages):
-    """使用OpenAI库发送请求"""
     full_response = ""
     logger.info(f"发送OpenAI请求到 {config.api_base} (模型: {config.model})")
     
@@ -310,6 +310,10 @@ def _send_openai_request(config, messages):
                 choice = chunk['choices'][0]
                 if 'delta' in choice and 'content' in choice['delta']:
                     content = choice['delta']['content']
+                    # 空值检查
+                    if content is None:
+                        content = ""
+                    
                     full_response += content
                     
                     # 记录流式输出到AI日志
