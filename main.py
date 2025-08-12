@@ -5,6 +5,7 @@ import re
 import time
 import traceback
 from datetime import datetime
+from collections import deque
 from chat_core import load_configs, run_chat_session, save_session, load_session, attach_file
 from chat_core import FileTooLargeError, APIConnectionError, APIResponseError, InvalidSessionError, ConfigLoadError
 
@@ -15,11 +16,26 @@ class ConfigError(Exception):
 class InvalidMessageFormat(Exception):
     pass
 
+class InvalidCommandError(Exception):
+    pass
+
+class ChannelNotFoundError(Exception):
+    pass
+
+class AINotFoundError(Exception):
+    pass
+
+class PermissionError(Exception):
+    pass
+
 # 颜色输出工具
 class Color:
     YELLOW = "\033[33m"
     RED = "\033[31m"
     BLUE = "\033[34m"
+    GREEN = "\033[32m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
     RESET = "\033[0m"
 
 # 历史记录管理类
@@ -109,6 +125,13 @@ class MultiAIChatSystem:
         self.last_observation = 0
         self.history = HistoryManager()
         self.start_time = time.time()
+        self.last_speaker = None  # 记录上一个发言的AI
+        self.priority_queue = deque()  # 优先级队列：[(priority, ai_id, reason), ...]
+        self.pending_commands = []  # 待处理的命令
+        self.channel_manager_ai = None  # 频道管理AI
+        self.memory_manager_ai = None  # 记忆管理AI
+        self.allowed_callers = []  # 允许呼叫的AI列表
+        self.excluded_ais = []  # 随机选择排除的AI列表
 
     def load_configurations(self):
         """加载API配置和工具配置"""
@@ -127,6 +150,40 @@ class MultiAIChatSystem:
         except json.JSONDecodeError as e:
             self.log_error(f"配置文件解析错误: {str(e)}")
             raise ConfigError(f"配置文件解析错误: {str(e)}")
+            
+        # 加载频道管理AI
+        self.channel_manager_ai = self.tool_config.get("频道管理AI")
+        if self.channel_manager_ai and self.channel_manager_ai not in self.tool_config["AI"]:
+            self.log_error(f"频道管理AI '{self.channel_manager_ai}' 未在AI配置中定义")
+            self.channel_manager_ai = None
+            
+        # 加载记忆管理AI
+        self.memory_manager_ai = self.tool_config.get("记忆管理AI")
+        if self.memory_manager_ai and self.memory_manager_ai not in self.tool_config["AI"]:
+            self.log_error(f"记忆管理AI '{self.memory_manager_ai}' 未在AI配置中定义")
+            self.memory_manager_ai = None
+            
+        # 加载允许呼叫的AI列表
+        self.allowed_callers = self.tool_config.get("允许呼叫", [])
+        
+        # 加载随机选择排除的AI列表
+        self.excluded_ais = self.tool_config.get("随机选择排除AI", [])
+        # 验证排除的AI是否存在于系统中
+        for ai_id in self.excluded_ais:
+            if ai_id not in self.tool_config["AI"]:
+                self.log_error(f"排除的AI '{ai_id}' 未在AI配置中定义，将被忽略")
+                self.excluded_ais.remove(ai_id)
+        
+        # 验证每个AI的"重新生成提示词"配置
+        for ai_id, ai_config in self.tool_config["AI"].items():
+            if "重新生成提示词" in ai_config:
+                regen_config = ai_config["重新生成提示词"]
+                # 验证"会不会"值
+                if "会不会" not in regen_config or regen_config["会不会"] not in ["True", "False"]:
+                    self.log_error(f"AI '{ai_id}' 的重新生成提示词配置无效: '会不会' 必须是 'True' 或 'False'")
+                # 验证用户提示词
+                if "发给提示词AI的用户提示词" not in regen_config or not isinstance(regen_config["发给提示词AI的用户提示词"], str):
+                    self.log_error(f"AI '{ai_id}' 的重新生成提示词配置无效: '发给提示词AI的用户提示词' 必须是字符串")
 
     def initialize_system(self):
         """初始化系统"""
@@ -144,7 +201,7 @@ class MultiAIChatSystem:
         # 初始化频道日志
         for ai_id, ai_config in self.tool_config["AI"].items():
             for channel in ai_config:
-                if channel not in ["prompt", "监察", "api"]:  # 跳过特殊字段
+                if channel not in ["prompt", "监察", "api", "重新生成提示词"]:  # 跳过特殊字段
                     if channel not in self.channel_logs:
                         self.channel_logs[channel] = []
         
@@ -184,16 +241,62 @@ class MultiAIChatSystem:
         self.history.add_message(channel, ai_id, message)
         
         # 彩色输出到终端
-        print(f"{Color.YELLOW}[{channel}]{Color.RESET}{Color.RED}{ai_id}:{Color.RESET}{Color.BLUE} {message}{Color.RESET}")
+        color = Color.BLUE
+        if channel == "系统":
+            color = Color.CYAN
+        elif channel == "监察":
+            color = Color.MAGENTA
+        elif channel == "管理":
+            color = Color.GREEN
+            
+        print(f"{Color.YELLOW}[{channel}]{Color.RESET}{Color.RED}{ai_id}:{Color.RESET}{color} {message}{Color.RESET}")
+
+    def get_next_speaker(self):
+        """获取下一个发言的AI（考虑优先级队列）"""
+        # 首先检查优先级队列
+        if self.priority_queue:
+            _, next_ai, reason = self.priority_queue.popleft()
+            self.log_message("系统", "调度器", f"优先级调用: {next_ai} (原因: {reason})")
+            return next_ai
+            
+        # 没有优先级任务时，从符合条件的AI中随机选择
+        eligible = self.get_eligible_speakers()
+        if not eligible:
+            self.log_error("没有符合条件的AI可以发言")
+            return None
+            
+        speaker_id = random.choice(eligible)
+        self.last_speaker = speaker_id
+        return speaker_id
 
     def get_eligible_speakers(self):
-        """获取有发言权限的AI列表"""
+        """获取有发言权限的AI列表（排除指定的AI）"""
         eligible = []
         for ai_id, ai_config in self.tool_config["AI"].items():
+            # 排除配置中指定的AI
+            if ai_id in self.excluded_ais:
+                continue
+                
+            # 排除上一个发言的AI，增加多样性
+            if ai_id == self.last_speaker:
+                continue
+                
             for channel, perms in ai_config.items():
-                if channel not in ["prompt", "监察", "api"] and "发送" in perms:
+                if channel not in ["prompt", "监察", "api", "重新生成提示词"] and "发送" in perms:
                     eligible.append(ai_id)
                     break
+                    
+        # 如果排除上一个发言者后没有可选的AI，则重置选择池（但仍排除配置中指定的AI）
+        if not eligible:
+            for ai_id, ai_config in self.tool_config["AI"].items():
+                if ai_id in self.excluded_ais:
+                    continue
+                    
+                for channel, perms in ai_config.items():
+                    if channel not in ["prompt", "监察", "api", "重新生成提示词"] and "发送" in perms:
+                        eligible.append(ai_id)
+                        break
+        
         return eligible
 
     def parse_message(self, message, speaker_id):
@@ -226,7 +329,7 @@ class MultiAIChatSystem:
         # 默认: 广播到所有有权限的频道
         broadcast_channels = []
         for channel, perms in self.tool_config["AI"][speaker_id].items():
-            if channel not in ["prompt", "监察", "api"] and "发送" in perms:
+            if channel not in ["prompt", "监察", "api", "重新生成提示词"] and "发送" in perms:
                 broadcast_channels.append(channel)
         
         if not broadcast_channels:
@@ -235,7 +338,7 @@ class MultiAIChatSystem:
         return [(ch, message) for ch in broadcast_channels]
 
     def monitor_message(self, speaker_id, message):
-        """监察消息是否合规"""
+        """监察消息是否合规（使用标签格式）"""
         monitor_id = self.tool_config["AI"][speaker_id].get("监察")
         if not monitor_id or monitor_id not in self.tool_config["AI"]:
             return True  # 没有监察AI或监察AI不存在，自动通过
@@ -245,8 +348,9 @@ class MultiAIChatSystem:
             session = self.ai_memories[monitor_id][:]
             session.append({
                 "role": "user",
-                "content": f"请审查以下来自 {speaker_id} 的消息：\n\n{message}\n\n请判断是否应驳回。"
-                "回复必须以'驳回'或'不驳回'开头，并简要说明理由。"
+                "content": f"请审查以下来自 {speaker_id} 的消息：\n\n{message}\n\n"
+                "请判断是否应驳回。如果驳回，请使用以下格式：\n"
+                "<驳回>您的驳回理由<驳回/>"
             })
             
             # 获取监察结果
@@ -261,9 +365,11 @@ class MultiAIChatSystem:
             # 记录监察过程
             self.log_message("监察", monitor_id, f"审查 {speaker_id} 的消息: {response}")
             
-            # 检查结果
-            if response.startswith("驳回"):
-                self.log_message("系统", "监察", f"已驳回 {speaker_id} 的消息")
+            # 检查结果 - 使用标签格式
+            reject_match = re.search(r"<驳回>(.*?)<驳回/>", response, re.DOTALL)
+            if reject_match:
+                reason = reject_match.group(1).strip()
+                self.log_message("系统", "监察", f"已驳回 {speaker_id} 的消息: {reason}")
                 # 添加被驳回消息到历史记录
                 self.history.add_message("驳回", speaker_id, message)
                 return False
@@ -273,6 +379,19 @@ class MultiAIChatSystem:
             self.log_error(f"监察过程中出错: {str(e)}")
             return True  # 出错时默认通过
 
+    def extract_system_messages(self, message):
+        """提取消息中的系统消息标签"""
+        system_messages = []
+        # 查找所有<system>...</system>标签
+        matches = re.findall(r"<system>(.*?)<system/>", message, re.DOTALL)
+        for match in matches:
+            system_messages.append(match.strip())
+        
+        # 从原始消息中移除系统消息标签
+        cleaned_message = re.sub(r"<system>.*?<system/>", "", message, flags=re.DOTALL).strip()
+        
+        return system_messages, cleaned_message
+
     def distribute_message(self, speaker_id, parsed_messages):
         """分发消息到各个频道和AI"""
         for channel, content in parsed_messages:
@@ -281,64 +400,46 @@ class MultiAIChatSystem:
                 self.log_error(f"{speaker_id} 在 {channel} 没有发送权限")
                 continue
             
-            # 记录到频道
-            self.log_message(channel, speaker_id, content)
+            # 提取系统消息（如果有）
+            system_msgs, cleaned_content = self.extract_system_messages(content)
             
-            # 添加到接收者的记忆
-            for ai_id, ai_config in self.tool_config["AI"].items():
-                if channel in ai_config and "接受" in ai_config[channel]:
-                    role = "assistant" if ai_id == speaker_id else "user"
-                    self.ai_memories[ai_id].append({
-                        "role": role,
-                        "content": f"[{channel}] {content}"
-                    })
+            # 如果有系统消息，单独处理
+            for sys_msg in system_msgs:
+                # 系统消息发送到所有AI的系统频道
+                self.log_message("系统", speaker_id, f"[系统消息] {sys_msg}")
+                for ai_id in self.tool_config["AI"]:
+                    self.add_system_message(ai_id, f"来自 {speaker_id} 的系统消息: {sys_msg}")
+            
+            # 如果消息内容不为空，记录到频道
+            if cleaned_content:
+                self.log_message(channel, speaker_id, cleaned_content)
+                
+                # 添加到接收者的记忆
+                for ai_id, ai_config in self.tool_config["AI"].items():
+                    if channel in ai_config and "接受" in ai_config[channel]:
+                        role = "assistant" if ai_id == speaker_id else "user"
+                        self.ai_memories[ai_id].append({
+                            "role": role,
+                            "content": f"[{channel}] {cleaned_content}"
+                        })
 
     def rotate_prompts(self):
-        """轮换提示词"""
+        """轮换提示词（支持提示词再生机制）"""
         if "提示词生成AI" not in self.tool_config:
             return
         
         gen_ai_id = self.tool_config["提示词生成AI"]["AI"]
-        source_channel = self.tool_config["提示词生成AI"]["从哪个频道生成"]
+        source_channel = self.tool_config["提示词生成AI"].get("从哪个频道生成", "公共频道")
         
         if gen_ai_id not in self.tool_config["AI"]:
             self.log_error(f"提示词生成AI '{gen_ai_id}' 未定义")
             return
         
         try:
-            # 准备频道历史
-            channel_messages = self.history.get_channel_history(source_channel, 100)
-            channel_history = "\n".join([msg["content"] for msg in channel_messages])
-            
-            # 生成新提示词
-            session = [{
-                "role": "system",
-                "content": "你是一个提示词生成AI。请根据以下对话历史为各个AI生成新的系统提示词。"
-            }, {
-                "role": "user",
-                "content": f"请根据以下频道对话历史为每个AI生成新的系统提示词：\n\n{channel_history}\n\n"
-                "请按以下格式回复：\nAI1: 新提示词\nAI2: 新提示词\n..."
-            }]
-            
-            api_index = self.tool_config["AI"][gen_ai_id]["api"]
-            _, response = run_chat_session(self.api_configs, session, api_index)
-            
-            # 解析并应用新提示词
-            for line in response.split("\n"):
-                if ":" in line:
-                    ai_id, new_prompt = line.split(":", 1)
-                    ai_id = ai_id.strip()
-                    new_prompt = new_prompt.strip()
-                    
-                    if ai_id in self.tool_config["AI"]:
-                        # 更新提示词
-                        self.tool_config["AI"][ai_id]["prompt"] = new_prompt
-                        
-                        # 重置记忆
-                        self.ai_memories[ai_id] = [{
-                            "role": "system",
-                            "content": new_prompt
-                        }]
+            # 为每个AI生成新提示词（如果配置了提示词再生）
+            for ai_id, ai_config in self.tool_config["AI"].items():
+                if "重新生成提示词" in ai_config and ai_config["重新生成提示词"]["会不会"] == "True":
+                    self.regenerate_prompt(ai_id, gen_ai_id, source_channel)
             
             self.log_message("系统", "管理员", f"已轮换所有AI的提示词")
             self.last_prompt_rotation = self.round_count
@@ -351,6 +452,49 @@ class MultiAIChatSystem:
         
         except Exception as e:
             self.log_error(f"提示词轮换失败: {str(e)}")
+
+    def regenerate_prompt(self, ai_id, gen_ai_id, source_channel):
+        """为特定AI重新生成提示词"""
+        try:
+            # 获取目标AI的当前记忆（作为上下文）
+            ai_memory = self.ai_memories[ai_id].copy()
+            
+            # 获取提示词再生配置
+            regen_config = self.tool_config["AI"][ai_id]["重新生成提示词"]
+            user_prompt = regen_config["发给提示词AI的用户提示词"]
+            
+            # 添加用户提示词作为新消息
+            ai_memory.append({
+                "role": "user",
+                "content": user_prompt
+            })
+            
+            # 获取提示词生成AI的API索引
+            api_index = self.tool_config["AI"][gen_ai_id]["api"]
+            
+            # 运行会话生成新提示词
+            _, new_prompt = run_chat_session(self.api_configs, ai_memory, api_index)
+            
+            # 更新提示词
+            self.tool_config["AI"][ai_id]["prompt"] = new_prompt
+            
+            # 重置记忆（保留系统提示）
+            self.ai_memories[ai_id] = [{
+                "role": "system",
+                "content": new_prompt
+            }]
+            
+            self.log_message("系统", "管理员", f"已为 {ai_id} 重新生成提示词")
+            self.add_system_message(ai_id, "您的系统提示词已更新")
+            
+            # 记录提示词再生事件
+            self.history.add_system_event("prompt_regeneration", {
+                "ai": ai_id,
+                "new_prompt": new_prompt
+            })
+            
+        except Exception as e:
+            self.log_error(f"为 {ai_id} 重新生成提示词失败: {str(e)}")
 
     def perform_observation(self):
         """执行观察总结"""
@@ -411,6 +555,11 @@ class MultiAIChatSystem:
             
             # 保存会话
             for ai_id, memory in self.ai_memories.items():
+                # 确保memory是消息字典列表
+                if not isinstance(memory, list):
+                    self.log_error(f"AI {ai_id} 的记忆不是列表类型: {type(memory)}")
+                    continue
+                    
                 session_data = {
                     "timestamp": int(time.time()),
                     "title": f"{ai_id}_session",
@@ -421,12 +570,14 @@ class MultiAIChatSystem:
             
             # 保存频道日志
             for channel, logs in self.channel_logs.items():
-                with open(f"logs/{channel}_log.txt", "a", encoding="utf-8") as f:
-                    f.write("\n".join(logs[-10:]) + "\n")
+                if isinstance(logs, list):
+                    with open(f"logs/{channel}_log.txt", "a", encoding="utf-8") as f:
+                        f.write("\n".join(logs[-10:]) + "\n")
             
             # 保存全局日志
-            with open("logs/global_log.txt", "a", encoding="utf-8") as f:
-                f.write("\n".join(self.global_log[-20:]) + "\n")
+            if isinstance(self.global_log, list):
+                with open("logs/global_log.txt", "a", encoding="utf-8") as f:
+                    f.write("\n".join(self.global_log[-20:]) + "\n")
             
             # 保存历史记录
             self.history.save_history()
@@ -436,7 +587,9 @@ class MultiAIChatSystem:
                 "round_count": self.round_count,
                 "last_prompt_rotation": self.last_prompt_rotation,
                 "last_observation": self.last_observation,
-                "start_time": self.start_time
+                "start_time": self.start_time,
+                "priority_queue": list(self.priority_queue),
+                "pending_commands": self.pending_commands
             }
             with open("system_state.json", "w", encoding="utf-8") as f:
                 json.dump(state, f)
@@ -447,6 +600,226 @@ class MultiAIChatSystem:
             self.log_error(f"保存状态失败: {str(e)}")
             self.log_error(traceback.format_exc())  # 添加详细的错误追踪
 
+    # ====================== 新增功能方法 ======================
+    
+    def process_special_commands(self, speaker_id, message):
+        """处理特殊命令"""
+        # 呼叫命令 {{Call:AI名称}}
+        call_pattern = r"\{\{Call:([^\}]+)\}\}"
+        call_match = re.search(call_pattern, message)
+        if call_match and speaker_id in self.allowed_callers:
+            called_ai = call_match.group(1).strip()
+            if called_ai in self.tool_config["AI"]:
+                # 添加到优先级队列（B级）
+                self.priority_queue.append(("B", called_ai, f"被 {speaker_id} 呼叫"))
+                self.log_message("系统", "调度器", f"呼叫命令: {speaker_id} 呼叫 {called_ai} (优先级B)")
+                # 通知被呼叫的AI
+                self.add_system_message(called_ai, f"您已被 {speaker_id} 呼叫，将在下次优先响应")
+                return True
+            else:
+                self.log_error(f"呼叫命令无效: 找不到AI '{called_ai}'")
+        
+        # 频道管理命令
+        channel_patterns = [
+            r"\{\{pd\.l\(([^\)]+)\)\}\}",  # 列出频道成员
+            r"\{\{pd\.s\(([^,]+),([^,]+),([^\)]+)\)\}\}",  # 设置权限
+            r"\{\{pd\.a\(([^,]+),([^\)]+)\)\}\}",  # 添加AI到频道
+            r"\{\{pd\.d\(([^,]+),([^\)]+)\)\}\}",  # 从频道移除AI
+        ]
+        
+        for pattern in channel_patterns:
+            match = re.search(pattern, message)
+            if match and speaker_id == self.channel_manager_ai:
+                try:
+                    if pattern == channel_patterns[0]:
+                        # 列出频道成员
+                        channel_name = match.group(1).strip()
+                        self.handle_channel_list(speaker_id, channel_name)
+                    elif pattern == channel_patterns[1]:
+                        # 设置权限
+                        channel_name = match.group(1).strip()
+                        ai_name = match.group(2).strip()
+                        permissions = json.loads(match.group(3).strip())
+                        self.handle_set_permissions(speaker_id, channel_name, ai_name, permissions)
+                    elif pattern == channel_patterns[2]:
+                        # 添加AI到频道
+                        channel_name = match.group(1).strip()
+                        ai_name = match.group(2).strip()
+                        self.handle_add_to_channel(speaker_id, channel_name, ai_name)
+                    elif pattern == channel_patterns[3]:
+                        # 从频道移除AI
+                        channel_name = match.group(1).strip()
+                        ai_name = match.group(2).strip()
+                        self.handle_remove_from_channel(speaker_id, channel_name, ai_name)
+                    
+                    # 添加频道管理AI到优先级队列（A级）
+                    self.priority_queue.appendleft(("A", self.channel_manager_ai, "频道管理命令后续操作"))
+                    return True
+                except (ChannelNotFoundError, AINotFoundError, PermissionError, InvalidCommandError) as e:
+                    self.log_error(f"频道管理命令错误: {str(e)}")
+                    self.add_system_message(speaker_id, f"命令执行失败: {str(e)}")
+                except Exception as e:
+                    self.log_error(f"处理频道命令时出错: {str(e)}")
+                    self.add_system_message(speaker_id, f"命令执行出错: {str(e)}")
+        
+        # 记忆管理命令 {{ep.r(AI名称,参考记忆布尔值)}}
+        memory_pattern = r"\{\{ep\.r\(([^,]+),([^\)]+)\)\}\}"
+        memory_match = re.search(memory_pattern, message)
+        if memory_match and speaker_id == self.memory_manager_ai:
+            try:
+                ai_name = memory_match.group(1).strip()
+                use_history = memory_match.group(2).strip().lower() == "true"
+                self.handle_reset_memory(speaker_id, ai_name, use_history)
+                return True
+            except (AINotFoundError, PermissionError) as e:
+                self.log_error(f"记忆管理命令错误: {str(e)}")
+                self.add_system_message(speaker_id, f"命令执行失败: {str(e)}")
+            except Exception as e:
+                self.log_error(f"处理记忆命令时出错: {str(e)}")
+                self.add_system_message(speaker_id, f"命令执行出错: {str(e)}")
+        
+        return False
+    
+    def handle_channel_list(self, speaker_id, channel_name):
+        """处理列出频道成员命令"""
+        # 验证频道是否存在
+        if channel_name not in self.channel_logs:
+            raise ChannelNotFoundError(f"频道 '{channel_name}' 不存在")
+            
+        # 收集频道成员及权限
+        members = []
+        for ai_id, ai_config in self.tool_config["AI"].items():
+            if channel_name in ai_config:
+                permissions = ai_config[channel_name]
+                members.append(f"{ai_id}: {permissions}")
+        
+        result = f"频道 '{channel_name}' 成员:\n" + "\n".join(members) if members else f"频道 '{channel_name}' 无成员"
+        
+        # 添加系统消息通知
+        self.add_system_message(speaker_id, result)
+        self.log_message("管理", "系统", f"列出频道 '{channel_name}' 成员")
+    
+    def handle_set_permissions(self, speaker_id, channel_name, ai_name, permissions):
+        """处理设置权限命令"""
+        # 验证频道是否存在
+        if channel_name not in self.channel_logs:
+            raise ChannelNotFoundError(f"频道 '{channel_name}' 不存在")
+            
+        # 验证AI是否存在
+        if ai_name not in self.tool_config["AI"]:
+            raise AINotFoundError(f"AI '{ai_name}' 未定义")
+            
+        # 验证权限格式
+        if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
+            raise InvalidCommandError("权限必须为字符串列表")
+            
+        # 检查权限值是否有效
+        valid_perms = ["接受", "发送"]
+        for perm in permissions:
+            if perm not in valid_perms:
+                raise PermissionError(f"无效权限: '{perm}'，有效值为 {valid_perms}")
+        
+        # 更新权限
+        self.tool_config["AI"][ai_name][channel_name] = permissions
+        self.log_message("管理", "系统", f"设置 {ai_name} 在 '{channel_name}' 的权限为: {permissions}")
+        
+        # 通知相关AI
+        self.add_system_message(ai_name, f"您在频道 '{channel_name}' 的权限已更新为: {permissions}")
+        self.add_system_message(speaker_id, f"成功设置 {ai_name} 在 '{channel_name}' 的权限为: {permissions}")
+    
+    def handle_add_to_channel(self, speaker_id, channel_name, ai_name):
+        """处理添加AI到频道命令"""
+        # 验证频道是否存在
+        if channel_name not in self.channel_logs:
+            raise ChannelNotFoundError(f"频道 '{channel_name}' 不存在")
+            
+        # 验证AI是否存在
+        if ai_name not in self.tool_config["AI"]:
+            raise AINotFoundError(f"AI '{ai_name}' 未定义")
+            
+        # 检查是否已在频道中
+        if channel_name in self.tool_config["AI"][ai_name]:
+            raise InvalidCommandError(f"{ai_name} 已在频道 '{channel_name}' 中")
+            
+        # 添加AI到频道（默认只接收）
+        self.tool_config["AI"][ai_name][channel_name] = ["接受"]
+        self.log_message("管理", "系统", f"添加 {ai_name} 到频道 '{channel_name}'")
+        
+        # 通知相关AI
+        self.add_system_message(ai_name, f"您已被添加到频道 '{channel_name}'，默认权限: 仅接收")
+        self.add_system_message(speaker_id, f"成功添加 {ai_name} 到频道 '{channel_name}'")
+    
+    def handle_remove_from_channel(self, speaker_id, channel_name, ai_name):
+        """处理从频道移除AI命令"""
+        # 验证频道是否存在
+        if channel_name not in self.channel_logs:
+            raise ChannelNotFoundError(f"频道 '{channel_name}' 不存在")
+            
+        # 验证AI是否存在
+        if ai_name not in self.tool_config["AI"]:
+            raise AINotFoundError(f"AI '{ai_name}' 未定义")
+            
+        # 检查是否在频道中
+        if channel_name not in self.tool_config["AI"][ai_name]:
+            raise InvalidCommandError(f"{ai_name} 不在频道 '{channel_name}' 中")
+            
+        # 从频道移除AI
+        del self.tool_config["AI"][ai_name][channel_name]
+        self.log_message("管理", "系统", f"从频道 '{channel_name}' 移除 {ai_name}")
+        
+        # 通知相关AI
+        self.add_system_message(ai_name, f"您已被从频道 '{channel_name}' 移除")
+        self.add_system_message(speaker_id, f"成功从频道 '{channel_name}' 移除 {ai_name}")
+    
+    def handle_reset_memory(self, speaker_id, ai_name, use_history):
+        """处理重置记忆命令"""
+        # 验证AI是否存在
+        if ai_name not in self.tool_config["AI"]:
+            raise AINotFoundError(f"AI '{ai_name}' 未定义")
+            
+        # 验证操作权限
+        if speaker_id != self.memory_manager_ai:
+            raise PermissionError(f"只有记忆管理AI可以执行此操作")
+        
+        # 获取原始提示词
+        original_prompt = self.tool_config["AI"][ai_name].get("prompt", "你是一个AI助手")
+        
+        # 如果使用历史记录
+        if use_history:
+            # 获取最近的历史记录
+            history = self.history.get_ai_history(ai_name, 10)
+            history_str = "\n".join([f"[{msg['channel']}] {msg['content']}" for msg in history])
+            
+            # 创建新的系统提示
+            new_system = f"{original_prompt}\n\n以下是你最近的消息历史，供参考：\n{history_str}"
+        else:
+            new_system = original_prompt
+        
+        # 重置记忆
+        self.ai_memories[ai_name] = [{
+            "role": "system",
+            "content": new_system
+        }]
+        
+        # 记录操作
+        self.log_message("管理", "系统", f"重置 {ai_name} 的记忆 (参考历史: {use_history})")
+        
+        # 通知相关AI
+        self.add_system_message(ai_name, "您的记忆已被重置" + ("（包含历史参考）" if use_history else ""))
+        self.add_system_message(speaker_id, f"成功重置 {ai_name} 的记忆 (参考历史: {use_history})")
+    
+    def add_system_message(self, ai_id, message):
+        """添加系统消息到AI的记忆"""
+        if ai_id in self.ai_memories:
+            self.ai_memories[ai_id].append({
+                "role": "system",
+                "content": message
+            })
+            # 同时添加到历史记录
+            self.history.add_message("系统", "系统", f"给 {ai_id} 的通知: {message}")
+
+    # ====================== 主运行循环 ======================
+    
     def run(self):
         """运行主循环"""
         try:
@@ -458,18 +831,19 @@ class MultiAIChatSystem:
             self.initialize_system()
             
             self.log_message("系统", "管理员", "多AI交流系统已启动")
+            self.log_message("系统", "管理员", f"频道管理AI: {self.channel_manager_ai or '未设置'}")
+            self.log_message("系统", "管理员", f"记忆管理AI: {self.memory_manager_ai or '未设置'}")
+            self.log_message("系统", "管理员", f"允许呼叫的AI: {', '.join(self.allowed_callers) or '无'}")
+            self.log_message("系统", "管理员", f"随机选择排除的AI: {', '.join(self.excluded_ais) or '无'}")
             
             while True:
                 self.round_count += 1
                 
                 # 1. 选择发言人
-                eligible = self.get_eligible_speakers()
-                if not eligible:
-                    self.log_error("没有符合条件的AI可以发言")
+                speaker_id = self.get_next_speaker()
+                if not speaker_id:
                     time.sleep(5)
                     continue
-                
-                speaker_id = random.choice(eligible)
                 
                 try:
                     # 2. 生成消息
@@ -483,22 +857,28 @@ class MultiAIChatSystem:
                     # 更新AI的记忆
                     self.ai_memories[speaker_id] = updated_session
                     
-                    # 3. 监察机制
+                    # 3. 处理特殊命令
+                    command_processed = self.process_special_commands(speaker_id, response)
+                    if command_processed:
+                        # 命令已处理，不需要分发消息
+                        continue
+                    
+                    # 4. 监察机制
                     if not self.monitor_message(speaker_id, response):
                         continue  # 消息被驳回
                     
-                    # 4. 解析消息
+                    # 5. 解析消息
                     parsed_messages = self.parse_message(response, speaker_id)
                     
-                    # 5. 分发消息
+                    # 6. 分发消息
                     self.distribute_message(speaker_id, parsed_messages)
                     
-                    # 6. 提示词轮换
+                    # 7. 提示词轮换
                     rotation_freq = self.tool_config.get("每多少次提示词轮换", 100)
                     if self.round_count - self.last_prompt_rotation >= rotation_freq:
                         self.rotate_prompts()
                     
-                    # 7. 观察总结
+                    # 8. 观察总结
                     if "观察者" in self.tool_config:
                         obs_freq = self.tool_config["观察者"]["每多少次观察总结一次"]
                         if self.round_count - self.last_observation >= obs_freq:

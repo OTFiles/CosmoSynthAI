@@ -1,6 +1,10 @@
 # 其他程序中调用示例
 from chat_core import load_configs, run_chat_session, attach_file, save_session, load_session
 
+# 可以设置日志级别（可选）
+import logging
+logging.basicConfig(level=logging.DEBUG)  # 如需更详细日志
+
 # 加载配置
 try:
     configs = load_configs("config.txt")

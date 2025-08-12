@@ -4,7 +4,25 @@ import re
 import json
 import time
 import requests
+import logging
 from pathlib import Path
+from datetime import datetime
+import fcntl  # 用于文件锁定
+
+# 设置日志
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+LOG_FILE = LOG_DIR / "chat_core.log"
+AI_OUTPUT_LOG = LOG_DIR / "AIoutput.log"  # AI输出日志文件
+
+# 配置日志
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger("chat_core")
 
 # 异常定义
 class FileTooLargeError(Exception): pass
@@ -22,6 +40,59 @@ MAX_MESSAGE_LENGTH = 5000
 # 历史记录目录
 HISTORY_DIR = Path("chat_history")
 HISTORY_DIR.mkdir(exist_ok=True)
+
+def _write_ai_log(entry):
+    """
+    将AI输出条目写入日志文件
+    格式: {"timestamp": "2023-08-12 14:30:45.123", "model": "gpt-4", "provider": "OpenAI", "content": "响应内容"}
+    """
+    try:
+        # 确保日志目录存在
+        AI_OUTPUT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(AI_OUTPUT_LOG, 'a', encoding='utf-8') as log_file:
+            # 获取文件锁
+            fcntl.flock(log_file, fcntl.LOCK_EX)
+            
+            # 写入JSON格式的日志条目
+            log_file.write(json.dumps(entry, ensure_ascii=False) + '\n')
+            log_file.flush()  # 强制刷新缓冲区
+            
+            # 释放文件锁
+            fcntl.flock(log_file, fcntl.LOCK_UN)
+            
+    except IOError as e:
+        logger.error(f"写入AI输出日志失败: {str(e)}")
+    except Exception as e:
+        logger.error(f"AI日志写入意外错误: {str(e)}")
+
+def _log_ai_output(config, content, is_streaming=True):
+    """
+    记录AI输出到专用日志
+    
+    参数:
+        config: 当前使用的配置
+        content: 要记录的内容
+        is_streaming: 是否为流式输出
+    """
+    try:
+        # 获取带毫秒的时间戳
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        
+        # 构建日志条目
+        entry = {
+            "timestamp": timestamp,
+            "model": config.model,
+            "provider": config.name,
+            "content": content,
+            "streaming": is_streaming
+        }
+        
+        # 写入日志
+        _write_ai_log(entry)
+        
+    except Exception as e:
+        logger.error(f"创建AI日志条目失败: {str(e)}")
 
 class ChatConfig:
     def __init__(self, name, api_base, api_key, model, request_type="openai", headers=None, is_infini=False):
@@ -52,9 +123,11 @@ def load_configs(config_filename):
     configs = []
     
     if not os.path.exists(config_filename):
+        logger.error(f"配置文件不存在: {config_filename}")
         raise FileNotFoundError(f"配置文件不存在: {config_filename}")
     
     try:
+        logger.info(f"开始加载配置文件: {config_filename}")
         with open(config_filename, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
@@ -84,6 +157,7 @@ def load_configs(config_filename):
                             headers_str = headers_str.replace("'", '"')
                             headers = json.loads(headers_str)
                         except:
+                            logger.warning(f"解析头部JSON失败: {headers_str}")
                             pass
                 
                 is_infini = False
@@ -94,30 +168,41 @@ def load_configs(config_filename):
                 
                 config = ChatConfig(name, api_base, api_key, model, request_type, headers, is_infini)
                 configs.append(config)
+                logger.info(f"加载配置: {config}")
     except Exception as e:
+        logger.error(f"加载配置文件出错: {str(e)}")
         raise ConfigLoadError(f"加载配置文件出错: {str(e)}")
     
     if not configs:
+        logger.error("配置文件中未找到有效的API配置")
         raise ConfigLoadError("配置文件中未找到有效的API配置")
     
+    logger.info(f"成功加载 {len(configs)} 个API配置")
     return configs
 
 def attach_file(content, file_path):
     """将文件内容嵌入到字符串中"""
+    logger.info(f"尝试嵌入文件: {file_path}")
+    
     if not os.path.exists(file_path):
+        logger.error(f"文件不存在: {file_path}")
         raise FileNotFoundError(f"文件不存在: {file_path}")
     
     file_size = os.path.getsize(file_path)
     if file_size > MAX_FILE_SIZE:
+        logger.error(f"文件过大(>{MAX_FILE_SIZE/1024}KB): {file_path}")
         raise FileTooLargeError(f"文件过大(>{MAX_FILE_SIZE/1024}KB): {file_path}")
     
     with open(file_path, 'r', encoding='utf-8') as f:
         file_content = f.read()
     
+    logger.info(f"成功嵌入文件内容: {file_path} ({len(file_content)} 字符)")
     return content.replace(f"{{{{:F{file_path}}}}}", f"\n```文件内容:{file_path}\n{file_content}\n```\n")
 
 def save_session(messages, filename):
     """保存对话历史到文件"""
+    logger.info(f"尝试保存会话到文件: {filename}")
+    
     if not filename.endswith('.json'):
         filename += '.json'
     
@@ -147,25 +232,32 @@ def save_session(messages, filename):
     try:
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info(f"会话已保存到: {file_path}")
         return file_path
     except Exception as e:
+        logger.error(f"保存失败: {str(e)}")
         raise RuntimeError(f"保存失败: {str(e)}")
 
 def load_session(filename):
     """从文件加载对话历史"""
+    logger.info(f"尝试加载会话文件: {filename}")
+    
     if not filename.endswith('.json'):
         filename += '.json'
     
     file_path = HISTORY_DIR / filename
     
     if not file_path.exists():
+        logger.error(f"历史文件不存在: {file_path}")
         raise FileNotFoundError(f"历史文件不存在: {file_path}")
     
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        logger.info(f"成功加载会话: {file_path} ({len(data['messages'])} 条消息)")
         return data['messages']
     except Exception as e:
+        logger.error(f"加载失败: {str(e)}")
         raise InvalidSessionError(f"加载失败: {str(e)}")
 
 def _embed_file_content(content):
@@ -176,6 +268,8 @@ def _embed_file_content(content):
     for file_path in matches:
         file_path = file_path.strip()
         try:
+            logger.debug(f"处理文件标记: {file_path}")
+            
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"文件不存在: {file_path}")
             
@@ -187,7 +281,9 @@ def _embed_file_content(content):
                 file_content = f.read()
             
             content = content.replace(f"{{{{:F{file_path}}}}}", f"\n```文件内容:{file_path}\n{file_content}\n```\n")
+            logger.debug(f"文件内容嵌入成功: {file_path}")
         except Exception as e:
+            logger.error(f"文件内容嵌入失败: {file_path} - {str(e)}")
             raise e
     
     return content
@@ -195,6 +291,7 @@ def _embed_file_content(content):
 def _send_openai_request(config, messages):
     """使用OpenAI库发送请求"""
     full_response = ""
+    logger.info(f"发送OpenAI请求到 {config.api_base} (模型: {config.model})")
     
     try:
         response = openai.ChatCompletion.create(
@@ -206,26 +303,39 @@ def _send_openai_request(config, messages):
             headers=config.headers
         )
         
+        logger.debug("开始接收流式响应...")
+        
         for chunk in response:
             if 'choices' in chunk and len(chunk['choices']) > 0:
                 choice = chunk['choices'][0]
                 if 'delta' in choice and 'content' in choice['delta']:
                     content = choice['delta']['content']
                     full_response += content
+                    
+                    # 记录流式输出到AI日志
+                    try:
+                        _log_ai_output(config, content)
+                    except Exception as e:
+                        logger.error(f"记录流式输出失败: {str(e)}")
         
         if not full_response:
+            logger.warning("AI未返回有效响应")
             raise APIResponseError("AI未返回有效响应")
         
+        logger.info(f"成功接收响应: {len(full_response)} 字符")
         return full_response
     
     except openai.error.APIError as e:
+        logger.error(f"OpenAI API错误: {str(e)}")
         raise APIConnectionError(f"API错误: {str(e)}")
     except Exception as e:
+        logger.error(f"OpenAI请求错误: {str(e)}")
         raise APIConnectionError(f"请求错误: {str(e)}")
 
 def _send_curl_request(config, messages):
     """使用Requests库发送自定义请求"""
     full_response = ""
+    logger.info(f"发送CURL请求到 {config.api_base} (模型: {config.model})")
     
     try:
         if config.is_infini:
@@ -241,6 +351,9 @@ def _send_curl_request(config, messages):
         if config.headers:
             headers.update(config.headers)
         
+        logger.debug(f"请求头: {headers}")
+        logger.debug(f"请求体: {json.dumps(payload, ensure_ascii=False)[:500]}...")
+        
         response = requests.post(
             config.api_base,
             json=payload,
@@ -249,22 +362,34 @@ def _send_curl_request(config, messages):
         )
         
         if response.status_code != 200:
+            logger.error(f"API响应错误: HTTP {response.status_code} - {response.text[:500]}")
             raise APIResponseError(f"HTTP {response.status_code} - {response.text}")
         
         # 处理Infini格式的非流式响应
         if config.is_infini:
+            logger.debug("处理Infini格式响应")
             data = response.json()
             if "choices" in data and len(data["choices"]) > 0:
                 choice = data["choices"][0]
                 if "message" in choice and "content" in choice["message"]:
                     full_response = choice["message"]["content"]
                 else:
+                    logger.warning("API响应格式不兼容")
                     raise APIResponseError("API响应格式不兼容")
             else:
+                logger.warning("AI未返回有效响应")
                 raise APIResponseError("AI未返回有效响应")
+            
+            # 记录完整响应到AI日志
+            try:
+                _log_ai_output(config, full_response, is_streaming=False)
+            except Exception as e:
+                logger.error(f"记录完整响应失败: {str(e)}")
+                
             return full_response
         
         # 处理流式响应
+        logger.debug("开始处理流式响应...")
         for line in response.iter_lines():
             if not line:
                 continue
@@ -281,6 +406,12 @@ def _send_curl_request(config, messages):
                     if "delta" in choice and "content" in choice["delta"]:
                         content = choice["delta"]["content"]
                         full_response += content
+                        
+                        # 记录流式输出到AI日志
+                        try:
+                            _log_ai_output(config, content)
+                        except Exception as e:
+                            logger.error(f"记录流式输出失败: {str(e)}")
                 
                 if data.get("done", False) or data.get("finish_reason", None):
                     break
@@ -288,16 +419,21 @@ def _send_curl_request(config, messages):
             except json.JSONDecodeError:
                 continue
             except Exception as e:
+                logger.error(f"响应解析错误: {str(e)}")
                 raise APIResponseError(f"解析错误: {str(e)}")
         
         if not full_response:
+            logger.warning("AI未返回有效响应")
             raise APIResponseError("AI未返回有效响应")
         
+        logger.info(f"成功接收响应: {len(full_response)} 字符")
         return full_response
     
     except requests.exceptions.RequestException as e:
+        logger.error(f"网络错误: {str(e)}")
         raise APIConnectionError(f"网络错误: {str(e)}")
     except Exception as e:
+        logger.error(f"请求错误: {str(e)}")
         raise APIConnectionError(f"请求错误: {str(e)}")
 
 def run_chat_session(configs, session, config_index=0):
@@ -312,32 +448,41 @@ def run_chat_session(configs, session, config_index=0):
     返回:
         (完整会话, AI回复文本)
     """
+    logger.info("开始聊天会话")
+    
     if not session:
+        logger.error("会话不能为空")
         raise ValueError("会话不能为空")
     
     if config_index < 0 or config_index >= len(configs):
-        raise IndexError(f"无效的配置索引: {config_index}")
+        logger.error(f"无效的配置索引: {config_index} (可用配置数: {len(configs)})")
+        raise IndexError(f"无效的配置索引: {config_index} (可用配置数: {len(configs)})")
     
     config = configs[config_index]
+    logger.info(f"使用配置: {config.name} ({config.model}), 请求类型: {config.request_type}")
     
     # 处理文件标记
     processed_session = []
     for msg in session:
         if msg['role'] == 'user':
             try:
+                logger.debug(f"处理用户消息: {msg['content'][:100]}...")
                 # 处理文件标记
                 content = _embed_file_content(msg['content'])
                 # 截断过长的消息
                 if len(content) > MAX_MESSAGE_LENGTH:
+                    logger.warning(f"消息过长({len(content)}字符)，已截断")
                     content = content[:MAX_MESSAGE_LENGTH] + "\n...（消息过长，已截断）"
                 processed_session.append({"role": "user", "content": content})
             except Exception as e:
+                logger.error(f"处理消息失败: {str(e)}")
                 raise e
         else:
             processed_session.append(msg)
     
     # 只保留最近的10条消息
     messages_to_send = processed_session[-10:]
+    logger.info(f"发送 {len(messages_to_send)} 条消息到API")
     
     # 发送请求
     try:
@@ -346,6 +491,7 @@ def run_chat_session(configs, session, config_index=0):
         else:
             full_response = _send_openai_request(config, messages_to_send)
     except Exception as e:
+        logger.error(f"API请求失败: {str(e)}")
         raise e
     
     # 添加元数据到回复消息
@@ -363,4 +509,5 @@ def run_chat_session(configs, session, config_index=0):
     updated_session = session.copy()
     updated_session.append(full_response_msg)
     
+    logger.info(f"聊天会话完成，回复长度: {len(full_response)} 字符")
     return updated_session, full_response
