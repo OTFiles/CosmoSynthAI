@@ -132,6 +132,7 @@ class MultiAIChatSystem:
         self.memory_manager_ai = None  # 记忆管理AI
         self.allowed_callers = []  # 允许呼叫的AI列表
         self.excluded_ais = []  # 随机选择排除的AI列表
+        self.log_file = "system_log.txt"  # 系统日志文件
 
     def load_configurations(self):
         """加载API配置和工具配置"""
@@ -223,7 +224,16 @@ class MultiAIChatSystem:
         log_entry = f"[ERROR][{timestamp}] {message}"
         self.global_log.append(log_entry)
         print(f"{Color.RED}{log_entry}{Color.RESET}")
+        self._write_to_log(log_entry)  # 写入日志文件
         self.history.add_system_event("error", message)
+
+    def _write_to_log(self, message):
+        """将消息写入日志文件"""
+        try:
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(message + "\n")
+        except Exception as e:
+            print(f"写入日志文件失败: {str(e)}")
 
     def log_message(self, channel, ai_id, message):
         """记录消息到日志"""
@@ -240,6 +250,9 @@ class MultiAIChatSystem:
         # 添加到历史记录
         self.history.add_message(channel, ai_id, message)
         
+        # 写入日志文件
+        self._write_to_log(log_entry)
+        
         # 彩色输出到终端
         color = Color.BLUE
         if channel == "系统":
@@ -255,7 +268,14 @@ class MultiAIChatSystem:
         """记录驳回消息（不广播到任何频道）"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_entry = f"[REJECT][{timestamp}] {speaker_id}: {reason} (原始消息: {message})"
+        
+        # 添加到全局日志
         self.global_log.append(log_entry)
+        
+        # 写入日志文件
+        self._write_to_log(log_entry)
+        
+        # 终端输出
         print(f"{Color.MAGENTA}{log_entry}{Color.RESET}")
         
         # 添加到历史记录的"驳回"频道
