@@ -250,6 +250,19 @@ class MultiAIChatSystem:
             color = Color.GREEN
             
         print(f"{Color.YELLOW}[{channel}]{Color.RESET}{Color.RED}{ai_id}:{Color.RESET}{color} {message}{Color.RESET}")
+    
+    def log_rejection(self, speaker_id, reason, message):
+        """记录驳回消息（不广播到任何频道）"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[REJECT][{timestamp}] {speaker_id}: {reason} (原始消息: {message})"
+        self.global_log.append(log_entry)
+        print(f"{Color.MAGENTA}{log_entry}{Color.RESET}")
+        
+        # 添加到历史记录的"驳回"频道
+        self.history.add_message("驳回", speaker_id, message)
+        
+        # 添加系统消息通知被驳回的AI
+        self.add_system_message(speaker_id, f"您的消息被驳回，原因: {reason}")
 
     def get_next_speaker(self):
         """获取下一个发言的AI（考虑优先级队列）"""
@@ -271,31 +284,32 @@ class MultiAIChatSystem:
 
     def get_eligible_speakers(self):
         """获取有发言权限的AI列表（排除指定的AI）"""
-        eligible = []
+        # 使用集合确保每个AI仅被添加一次
+        eligible_set = set()
+        
+        # 第一遍：收集所有有发送权限的AI
         for ai_id, ai_config in self.tool_config["AI"].items():
             # 排除配置中指定的AI
             if ai_id in self.excluded_ais:
                 continue
                 
-            # 排除上一个发言的AI，增加多样性
-            if ai_id == self.last_speaker:
-                continue
-                
+            # 检查该AI是否有发送权限
             for channel, perms in ai_config.items():
-                if channel not in ["prompt", "监察", "api", "重新生成提示词"] and "发送" in perms:
-                    eligible.append(ai_id)
-                    break
-                    
-        # 如果排除上一个发言者后没有可选的AI，则重置选择池（但仍排除配置中指定的AI）
-        if not eligible:
-            for ai_id, ai_config in self.tool_config["AI"].items():
-                if ai_id in self.excluded_ais:
+                # 跳过特殊字段
+                if channel in ["prompt", "监察", "api", "重新生成提示词"]:
                     continue
                     
-                for channel, perms in ai_config.items():
-                    if channel not in ["prompt", "监察", "api", "重新生成提示词"] and "发送" in perms:
-                        eligible.append(ai_id)
-                        break
+                # 检查是否有发送权限
+                if "发送" in perms:
+                    eligible_set.add(ai_id)
+                    break  # 该AI已有发送权限，跳出内层循环
+        
+        # 排除上一个发言的AI，增加多样性
+        eligible = [ai for ai in eligible_set if ai != self.last_speaker]
+        
+        # 如果排除上一个发言者后没有可选的AI，则重置选择池（但仍排除配置中指定的AI）
+        if not eligible:
+            eligible = list(eligible_set)
         
         return eligible
 
@@ -362,16 +376,13 @@ class MultiAIChatSystem:
                 self.log_error(f"监察响应不是字符串类型: {type(response)}")
                 response = str(response)
             
-            # 记录监察过程
-            self.log_message("监察", monitor_id, f"审查 {speaker_id} 的消息: {response}")
-            
             # 检查结果 - 使用标签格式
             reject_match = re.search(r"<驳回>(.*?)<驳回/>", response, re.DOTALL)
             if reject_match:
                 reason = reject_match.group(1).strip()
-                self.log_message("系统", "监察", f"已驳回 {speaker_id} 的消息: {reason}")
-                # 添加被驳回消息到历史记录
-                self.history.add_message("驳回", speaker_id, message)
+                
+                # 记录驳回消息（不广播到任何频道）
+                self.log_rejection(speaker_id, reason, message)
                 return False
             return True
         

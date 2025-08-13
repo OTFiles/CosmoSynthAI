@@ -24,22 +24,12 @@ except ConfigLoadError as e:
 
 # 创建新会话
 session = [
-    {"role": "user", "content": "解释量子纠缠{{:Fphysics.txt}}"}
+    {"role": "user", "content": "我喜欢你，你喜欢我吗？"}
 ]
-
-# 在发送前处理文件标记
-try:
-    session[0]["content"] = attach_file(session[0]["content"], "physics.txt")
-except FileNotFoundError as e:
-    print(f"错误: {str(e)}")
-    exit()
-except FileTooLargeError as e:
-    print(f"错误: {str(e)}")
-    exit()
 
 # 运行会话 (使用第一个配置)
 try:
-    updated_session, ai_reply = run_chat_session(configs, session, 1)
+    updated_session, ai_reply = run_chat_session(configs, session, 0)
     
     # 保存会话
     save_session(updated_session, "quantum_chat.json")

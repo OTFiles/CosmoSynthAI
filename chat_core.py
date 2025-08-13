@@ -44,18 +44,31 @@ HISTORY_DIR.mkdir(exist_ok=True)
 def _write_ai_log(entry):
     """
     将AI输出条目写入日志文件
-    格式: {"timestamp": "2023-08-12 14:30:45.123", "model": "gpt-4", "provider": "OpenAI", "content": "响应内容"}
+    新格式: timestamp - model - provider - content - streaming
     """
     try:
         # 确保日志目录存在
         AI_OUTPUT_LOG.parent.mkdir(parents=True, exist_ok=True)
         
+        # 构建新格式的日志行
+        timestamp = entry.get("timestamp", "")
+        model = entry.get("model", "")
+        provider = entry.get("provider", "")
+        content = entry.get("content", "")
+        streaming = "true" if entry.get("streaming", False) else "false"
+        
+        # 替换换行符为空格以保持单行格式
+        content = content.replace('\n', ' ').replace('\r', ' ')
+        
+        # 构建日志行
+        log_line = f"{timestamp} - {model} - {provider} - {content} - {streaming}\n"
+        
         with open(AI_OUTPUT_LOG, 'a', encoding='utf-8') as log_file:
             # 获取文件锁
             fcntl.flock(log_file, fcntl.LOCK_EX)
             
-            # 写入JSON格式的日志条目
-            log_file.write(json.dumps(entry, ensure_ascii=False) + '\n')
+            # 写入格式化的日志行
+            log_file.write(log_line)
             log_file.flush()  # 强制刷新缓冲区
             
             # 释放文件锁
