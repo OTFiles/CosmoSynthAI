@@ -40,8 +40,10 @@ class Color:
 
 # 历史记录管理类
 class HistoryManager:
-    def __init__(self):
-        self.history_file = "history.json"
+    def __init__(self, logs_dir="logs"):
+        self.logs_dir = logs_dir
+        os.makedirs(self.logs_dir, exist_ok=True)
+        self.history_file = os.path.join(logs_dir, "history.json")
         self.history = self.load_history()
     
     def load_history(self):
@@ -115,6 +117,9 @@ class HistoryManager:
 # 主程序类
 class MultiAIChatSystem:
     def __init__(self):
+        self.logs_dir = "logs"
+        os.makedirs(self.logs_dir, exist_ok=True)
+        
         self.api_configs = []
         self.tool_config = {}
         self.ai_memories = {}
@@ -123,7 +128,7 @@ class MultiAIChatSystem:
         self.round_count = 0
         self.last_prompt_rotation = 0
         self.last_observation = 0
-        self.history = HistoryManager()
+        self.history = HistoryManager(self.logs_dir)
         self.start_time = time.time()
         self.last_speaker = None  # 记录上一个发言的AI
         self.priority_queue = deque()  # 优先级队列：[(priority, ai_id, reason), ...]
@@ -132,7 +137,7 @@ class MultiAIChatSystem:
         self.memory_manager_ai = None  # 记忆管理AI
         self.allowed_callers = []  # 允许呼叫的AI列表
         self.excluded_ais = []  # 随机选择排除的AI列表
-        self.log_file = "system_log.txt"  # 系统日志文件
+        self.log_file = os.path.join(self.logs_dir, "system_log.txt")  # 系统日志文件
 
     def load_configurations(self):
         """加载API配置和工具配置"""
@@ -581,8 +586,10 @@ class MultiAIChatSystem:
         """保存当前状态"""
         try:
             # 确保目录存在
-            os.makedirs("sessions", exist_ok=True)
-            os.makedirs("logs", exist_ok=True)
+            sessions_dir = os.path.join(self.logs_dir, "sessions")
+            logs_dir = self.logs_dir
+            os.makedirs(sessions_dir, exist_ok=True)
+            os.makedirs(logs_dir, exist_ok=True)
             
             # 保存会话
             for ai_id, memory in self.ai_memories.items():
@@ -597,23 +604,27 @@ class MultiAIChatSystem:
                     "model": "multi-ai-system",
                     "messages": memory
                 }
-                save_session(session_data, f"sessions/{ai_id}_session_{self.round_count}.json")
+                session_file = os.path.join(sessions_dir, f"{ai_id}_session_{self.round_count}.json")
+                save_session(session_data, session_file)
             
             # 保存频道日志
             for channel, logs in self.channel_logs.items():
                 if isinstance(logs, list):
-                    with open(f"logs/{channel}_log.txt", "a", encoding="utf-8") as f:
+                    channel_log_file = os.path.join(logs_dir, f"{channel}_log.txt")
+                    with open(channel_log_file, "a", encoding="utf-8") as f:
                         f.write("\n".join(logs[-10:]) + "\n")
             
             # 保存全局日志
             if isinstance(self.global_log, list):
-                with open("logs/global_log.txt", "a", encoding="utf-8") as f:
+                global_log_file = os.path.join(logs_dir, "global_log.txt")
+                with open(global_log_file, "a", encoding="utf-8") as f:
                     f.write("\n".join(self.global_log[-20:]) + "\n")
             
             # 保存历史记录
             self.history.save_history()
             
             # 保存系统状态
+            state_file = os.path.join(logs_dir, "system_state.json")
             state = {
                 "round_count": self.round_count,
                 "last_prompt_rotation": self.last_prompt_rotation,
@@ -622,7 +633,7 @@ class MultiAIChatSystem:
                 "priority_queue": list(self.priority_queue),
                 "pending_commands": self.pending_commands
             }
-            with open("system_state.json", "w", encoding="utf-8") as f:
+            with open(state_file, "w", encoding="utf-8") as f:
                 json.dump(state, f)
             
             self.log_message("系统", "管理员", f"系统状态已保存 (轮次: {self.round_count})")
@@ -855,8 +866,7 @@ class MultiAIChatSystem:
         """运行主循环"""
         try:
             # 创建必要的目录
-            os.makedirs("sessions", exist_ok=True)
-            os.makedirs("logs", exist_ok=True)
+            os.makedirs(os.path.join(self.logs_dir, "sessions"), exist_ok=True)
             
             self.load_configurations()
             self.initialize_system()
