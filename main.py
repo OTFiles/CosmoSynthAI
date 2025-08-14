@@ -338,12 +338,20 @@ class MultiAIChatSystem:
         
         return eligible
 
+    def remove_think_tags(self, text):
+        """移除<think>和<think/>包裹的内容"""
+        # 使用正则表达式移除所有<think>...</think>标签及其内容
+        return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+
     def parse_message(self, message, speaker_id):
         """解析AI的消息格式"""
         # 确保消息是字符串
         if not isinstance(message, str):
             self.log_error(f"消息不是字符串类型: {type(message)}")
             message = str(message)
+        
+        # 移除<think>标签及其内容
+        message = self.remove_think_tags(message)
         
         # 格式1: [频道]消息
         single_match = re.match(r"^\[([^\]]+)\](.+)$", message)
