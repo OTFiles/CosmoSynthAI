@@ -138,6 +138,7 @@ class MultiAIChatSystem:
         self.allowed_callers = []  # 允许呼叫的AI列表
         self.excluded_ais = []  # 随机选择排除的AI列表
         self.log_file = os.path.join(self.logs_dir, "system_log.txt")  # 系统日志文件
+        self.prompt_generators = []  # 存储提示词生成AI配置
 
     def load_configurations(self):
         """加载API配置和工具配置"""
@@ -180,37 +181,53 @@ class MultiAIChatSystem:
                 self.log_error(f"排除的AI '{ai_id}' 未在AI配置中定义，将被忽略")
                 self.excluded_ais.remove(ai_id)
         
+        # 加载提示词生成AI配置（改为数组结构）
+        self.prompt_generators = self.tool_config.get("提示词生成AI", [])
+        if self.prompt_generators:
+            # 验证提示词生成AI配置
+            valid_generators = []
+            for gen in self.prompt_generators:
+                if "id" not in gen or "AI" not in gen or "从哪个频道生成" not in gen:
+                    self.log_error(f"提示词生成AI配置无效: {gen}")
+                    continue
+                
+                # 验证id是否为正整数
+                if not isinstance(gen["id"], int) or gen["id"] < 0:
+                    self.log_error(f"提示词生成AI配置无效: id必须是正整数 ({gen})")
+                    continue
+                
+                # 验证AI是否存在
+                if gen["AI"] not in self.tool_config["AI"]:
+                    self.log_error(f"提示词生成AI '{gen['AI']}' 未在AI配置中定义")
+                    continue
+                
+                valid_generators.append(gen)
+            
+            self.prompt_generators = valid_generators
+        else:
+            self.log_error("未配置提示词生成AI，提示词轮换功能将不可用")
+        
         # 验证每个AI的"重新生成提示词"配置
         for ai_id, ai_config in self.tool_config["AI"].items():
             if "重新生成提示词" in ai_config:
                 regen_config = ai_config["重新生成提示词"]
+                
                 # 验证"会不会"值
                 if "会不会" not in regen_config or regen_config["会不会"] not in ["True", "False"]:
                     self.log_error(f"AI '{ai_id}' 的重新生成提示词配置无效: '会不会' 必须是 'True' 或 'False'")
+                
                 # 验证用户提示词
                 if "发给提示词AI的用户提示词" not in regen_config or not isinstance(regen_config["发给提示词AI的用户提示词"], str):
                     self.log_error(f"AI '{ai_id}' 的重新生成提示词配置无效: '发给提示词AI的用户提示词' 必须是字符串")
+                
+                # 验证id是否匹配提示词生成AI配置
+                if "id" in regen_config:
+                    gen_id = regen_config["id"]
+                    if not any(gen["id"] == gen_id for gen in self.prompt_generators):
+                        self.log_error(f"AI '{ai_id}' 的重新生成提示词配置无效: 找不到匹配的提示词生成AI (id={gen_id})")
+                else:
+                    self.log_error(f"AI '{ai_id}' 的重新生成提示词配置缺少id字段")
 
-    def initialize_system(self):
-        """初始化系统"""
-        # 验证配置
-        if "AI" not in self.tool_config:
-            raise ConfigError("配置文件中缺少AI定义")
-        
-        # 初始化AI记忆
-        for ai_id, ai_config in self.tool_config["AI"].items():
-            self.ai_memories[ai_id] = [{
-                "role": "system",
-                "content": ai_config.get("prompt", "你是一个AI助手")
-            }]
-        
-        # 初始化频道日志
-        for ai_id, ai_config in self.tool_config["AI"].items():
-            for channel in ai_config:
-                if channel not in ["prompt", "监察", "api", "重新生成提示词"]:  # 跳过特殊字段
-                    if channel not in self.channel_logs:
-                        self.channel_logs[channel] = []
-        
         # 验证观察者配置
         if "观察者" in self.tool_config:
             observer_ai = self.tool_config["观察者"]["AI"]
@@ -469,21 +486,39 @@ class MultiAIChatSystem:
 
     def rotate_prompts(self):
         """轮换提示词（支持提示词再生机制）"""
-        if "提示词生成AI" not in self.tool_config:
-            return
-        
-        gen_ai_id = self.tool_config["提示词生成AI"]["AI"]
-        source_channel = self.tool_config["提示词生成AI"].get("从哪个频道生成", "公共频道")
-        
-        if gen_ai_id not in self.tool_config["AI"]:
-            self.log_error(f"提示词生成AI '{gen_ai_id}' 未定义")
+        if not self.prompt_generators:
+            self.log_message("系统", "管理员", "提示词轮换已跳过: 未配置提示词生成AI")
             return
         
         try:
             # 为每个AI生成新提示词（如果配置了提示词再生）
             for ai_id, ai_config in self.tool_config["AI"].items():
                 if "重新生成提示词" in ai_config and ai_config["重新生成提示词"]["会不会"] == "True":
-                    self.regenerate_prompt(ai_id, gen_ai_id, source_channel)
+                    regen_config = ai_config["重新生成提示词"]
+                    gen_id = regen_config.get("id", None)
+                    
+                    # 查找匹配的提示词生成AI配置
+                    generator = None
+                    if gen_id is not None:
+                        for gen in self.prompt_generators:
+                            if gen["id"] == gen_id:
+                                generator = gen
+                                break
+                    
+                    # 如果未指定id或未找到匹配项，使用第一个生成器
+                    if not generator and self.prompt_generators:
+                        generator = self.prompt_generators[0]
+                        self.log_message("系统", "管理员", f"使用默认提示词生成器 (id={generator['id']}) 为 {ai_id} 生成提示词")
+                    
+                    if generator:
+                        self.regenerate_prompt(
+                            ai_id, 
+                            generator["AI"], 
+                            generator["从哪个频道生成"],
+                            regen_config["发给提示词AI的用户提示词"]
+                        )
+                    else:
+                        self.log_error(f"为 {ai_id} 重新生成提示词失败: 没有可用的提示词生成AI")
             
             self.log_message("系统", "管理员", f"已轮换所有AI的提示词")
             self.last_prompt_rotation = self.round_count
@@ -491,21 +526,17 @@ class MultiAIChatSystem:
             # 记录提示词轮换事件
             self.history.add_system_event("prompt_rotation", {
                 "round": self.round_count,
-                "source_channel": source_channel
+                "prompt_generators": [gen["AI"] for gen in self.prompt_generators]
             })
         
         except Exception as e:
             self.log_error(f"提示词轮换失败: {str(e)}")
 
-    def regenerate_prompt(self, ai_id, gen_ai_id, source_channel):
+    def regenerate_prompt(self, ai_id, gen_ai_id, source_channel, user_prompt):
         """为特定AI重新生成提示词"""
         try:
             # 获取目标AI的当前记忆（作为上下文）
             ai_memory = self.ai_memories[ai_id].copy()
-            
-            # 获取提示词再生配置
-            regen_config = self.tool_config["AI"][ai_id]["重新生成提示词"]
-            user_prompt = regen_config["发给提示词AI的用户提示词"]
             
             # 添加用户提示词作为新消息
             ai_memory.append({
@@ -528,12 +559,14 @@ class MultiAIChatSystem:
                 "content": new_prompt
             }]
             
-            self.log_message("系统", "管理员", f"已为 {ai_id} 重新生成提示词")
+            self.log_message("系统", "管理员", f"已为 {ai_id} 重新生成提示词 (生成AI: {gen_ai_id})")
             self.add_system_message(ai_id, "您的系统提示词已更新")
             
             # 记录提示词再生事件
             self.history.add_system_event("prompt_regeneration", {
                 "ai": ai_id,
+                "generator_ai": gen_ai_id,
+                "source_channel": source_channel,
                 "new_prompt": new_prompt
             })
             
@@ -884,6 +917,7 @@ class MultiAIChatSystem:
             self.log_message("系统", "管理员", f"记忆管理AI: {self.memory_manager_ai or '未设置'}")
             self.log_message("系统", "管理员", f"允许呼叫的AI: {', '.join(self.allowed_callers) or '无'}")
             self.log_message("系统", "管理员", f"随机选择排除的AI: {', '.join(self.excluded_ais) or '无'}")
+            self.log_message("系统", "管理员", f"提示词生成AI数量: {len(self.prompt_generators)}")
             
             while True:
                 self.round_count += 1
