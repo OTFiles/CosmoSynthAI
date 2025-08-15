@@ -421,17 +421,17 @@ class MultiAIChatSystem:
         # 移除<think>标签及其内容
         message = self.remove_think_tags(message)
         
-        # 格式1: [频道]消息
-        single_match = re.match(r"^\[([^\]]+)\](.+)$", message)
-        if single_match:
-            return [(single_match.group(1), single_match.group(2))]
-        
-        # 格式2: [频道1][频道2]消息
+        # 格式2: [频道1][频道2]消息(需要优先处理)
         multi_match = re.match(r"^(\[[^\]]+\])+(.+)$", message)
         if multi_match:
             channels = re.findall(r"\[([^\]]+)\]", message)
             content = multi_match.group(2)
             return [(ch, content) for ch in channels]
+        
+        # 格式1: [频道]消息
+        single_match = re.match(r"^\[([^\]]+)\](.+)$", message)
+        if single_match:
+            return [(single_match.group(1), single_match.group(2))]
         
         # 格式3: 多行消息
         if "\n" in message:
@@ -687,40 +687,9 @@ class MultiAIChatSystem:
     def save_state(self):
         """保存当前状态"""
         try:
-            # 确保目录存在
-            sessions_dir = os.path.join(self.logs_dir, "sessions")
+            # 确保日志目录存在
             logs_dir = self.logs_dir
-            os.makedirs(sessions_dir, exist_ok=True)
             os.makedirs(logs_dir, exist_ok=True)
-            
-            # 保存会话
-            for ai_id, memory in self.ai_memories.items():
-                # 确保memory是消息字典列表
-                if not isinstance(memory, list):
-                    self.log_error(f"AI {ai_id} 的记忆不是列表类型: {type(memory)}")
-                    continue
-                    
-                # 确保每个元素都是字典
-                valid_messages = []
-                for msg in memory:
-                    if isinstance(msg, dict) and "role" in msg and "content" in msg:
-                        valid_messages.append(msg)
-                    else:
-                        self.log_error(f"AI {ai_id} 的记忆包含无效条目: {type(msg)}")
-                
-                if not valid_messages:
-                    self.log_error(f"AI {ai_id} 没有有效的消息记忆")
-                    continue
-                    
-                # 创建正确的会话数据结构
-                session_data = {
-                    "timestamp": int(time.time()),
-                    "title": f"{ai_id}_session",
-                    "model": "multi-ai-system",
-                    "messages": valid_messages
-                }
-                session_file = os.path.join(sessions_dir, f"{ai_id}_session_{self.round_count}.json")
-                save_session(session_data, session_file)
             
             # 保存频道日志
             for channel, logs in self.channel_logs.items():
