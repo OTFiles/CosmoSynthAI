@@ -245,6 +245,35 @@ class MultiAIChatSystem:
             "config": self.tool_config,
             "start_time": self.start_time
         })
+        
+        # 初始化AI配置
+        self.initialize_system()
+
+    def initialize_system(self):
+        """初始化系统配置"""
+        # 验证配置
+        if "AI" not in self.tool_config:
+            raise ConfigError("配置文件中缺少AI定义")
+        
+        # 初始化AI记忆
+        self.ai_memories = {}
+        for ai_id, ai_config in self.tool_config["AI"].items():
+            self.ai_memories[ai_id] = [{
+                "role": "system",
+                "content": ai_config.get("prompt", "你是一个AI助手")
+            }]
+        
+        # 初始化频道日志
+        self.channel_logs = {}
+        for ai_id, ai_config in self.tool_config["AI"].items():
+            for channel in ai_config:
+                if channel not in ["prompt", "监察", "api", "重新生成提示词"]:  # 跳过特殊字段
+                    if channel not in self.channel_logs:
+                        self.channel_logs[channel] = []
+        
+        # 重置状态
+        self.first_ai_spoken = False
+        self.first_ai_id = None
 
     def log_error(self, message):
         """记录错误信息"""
@@ -615,7 +644,7 @@ class MultiAIChatSystem:
         channels = self.tool_config["观察者"]["观察频道"]
         
         if observer_id not in self.tool_config["AI"]:
-            self.log_error(f"观察者AI '{observer_id}' 未定义")
+            self.log_error(f"观察者AI '{observer_ai}' 未定义")
             return
         
         try:
@@ -943,7 +972,6 @@ class MultiAIChatSystem:
             os.makedirs(os.path.join(self.logs_dir, "sessions"), exist_ok=True)
             
             self.load_configurations()
-            self.initialize_system()
             
             self.log_message("系统", "管理员", "多AI交流系统已启动")
             self.log_message("系统", "管理员", f"频道管理AI: {self.channel_manager_ai or '未设置'}")
@@ -951,13 +979,7 @@ class MultiAIChatSystem:
             self.log_message("系统", "管理员", f"允许呼叫的AI: {', '.join(self.allowed_callers) or '无'}")
             self.log_message("系统", "管理员", f"随机选择排除的AI: {', '.join(self.excluded_ais) or '无'}")
             self.log_message("系统", "管理员", f"提示词生成AI数量: {len(self.prompt_generators)}")
-            
-            # 初始化AI记忆
-            for ai_id, ai_config in self.tool_config["AI"].items():
-                self.ai_memories[ai_id] = [{
-                    "role": "system",
-                    "content": ai_config.get("prompt", "你是一个AI助手")
-                }]
+            self.log_message("系统", "管理员", f"开场白: {self.opening_speech or '无'}")
             
             while True:
                 self.round_count += 1
