@@ -6,6 +6,7 @@ def tail_ai_output(log_file):
     """
     实时读取AI输出日志文件并仅输出AI内容部分
     启动时输出文件的全部内容，然后监控新增内容
+    正确处理换行符
     
     参数:
         log_file: 日志文件路径
@@ -28,6 +29,10 @@ def tail_ai_output(log_file):
                 if len(parts) >= 5:
                     # 获取内容部分（索引3）
                     content = parts[3]
+                    
+                    # 恢复换行符（将占位符替换回实际换行符）
+                    content = content.replace('\\n', '\n').replace('\\r', '\r')
+                    
                     # 输出内容
                     print(content, end='', flush=True)
     
@@ -66,6 +71,10 @@ def tail_ai_output(log_file):
                             if len(parts) >= 5:
                                 # 获取内容部分（索引3）
                                 content = parts[3]
+                                
+                                # 恢复换行符（将占位符替换回实际换行符）
+                                content = content.replace('\\n', '\n').replace('\\r', '\r')
+                                
                                 # 输出内容（不换行）
                                 print(content, end='', flush=True)
                         
