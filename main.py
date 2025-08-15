@@ -395,7 +395,7 @@ class MultiAIChatSystem:
         # 格式1: [频道]消息
         single_match = re.match(r"^\[([^\]]+)\](.+)$", message)
         if single_match:
-            return [(single_match.group(1), single_match.group(2)]
+            return [(single_match.group(1), single_match.group(2))]
         
         # 格式2: [频道1][频道2]消息
         multi_match = re.match(r"^(\[[^\]]+\])+(.+)$", message)
