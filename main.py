@@ -700,11 +700,24 @@ class MultiAIChatSystem:
                     self.log_error(f"AI {ai_id} 的记忆不是列表类型: {type(memory)}")
                     continue
                     
+                # 确保每个元素都是字典
+                valid_messages = []
+                for msg in memory:
+                    if isinstance(msg, dict) and "role" in msg and "content" in msg:
+                        valid_messages.append(msg)
+                    else:
+                        self.log_error(f"AI {ai_id} 的记忆包含无效条目: {type(msg)}")
+                
+                if not valid_messages:
+                    self.log_error(f"AI {ai_id} 没有有效的消息记忆")
+                    continue
+                    
+                # 创建正确的会话数据结构
                 session_data = {
                     "timestamp": int(time.time()),
                     "title": f"{ai_id}_session",
                     "model": "multi-ai-system",
-                    "messages": memory
+                    "messages": valid_messages
                 }
                 session_file = os.path.join(sessions_dir, f"{ai_id}_session_{self.round_count}.json")
                 save_session(session_data, session_file)
@@ -744,8 +757,6 @@ class MultiAIChatSystem:
         except Exception as e:
             self.log_error(f"保存状态失败: {str(e)}")
             self.log_error(traceback.format_exc())  # 添加详细的错误追踪
-
-    # ====================== 新增功能方法 ======================
     
     def process_special_commands(self, speaker_id, message):
         """处理特殊命令"""
