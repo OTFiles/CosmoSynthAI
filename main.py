@@ -5,7 +5,7 @@ import re
 import time
 import traceback
 from datetime import datetime
-from collections import deque
+from collections import deque, defaultdict
 from chat_core import load_configs, run_chat_session, save_session, load_session, attach_file
 from chat_core import FileTooLargeError, APIConnectionError, APIResponseError, InvalidSessionError, ConfigLoadError
 
@@ -139,6 +139,9 @@ class MultiAIChatSystem:
         self.excluded_ais = []  # 随机选择排除的AI列表
         self.log_file = os.path.join(self.logs_dir, "system_log.txt")  # 系统日志文件
         self.prompt_generators = []  # 存储提示词生成AI配置
+        self.opening_speech = ""  # 开场白
+        self.first_ai_spoken = False  # 标记第一个AI是否已发言
+        self.first_ai_id = None  # 第一个发言的AI
 
     def load_configurations(self):
         """加载API配置和工具配置"""
@@ -158,6 +161,9 @@ class MultiAIChatSystem:
             self.log_error(f"配置文件解析错误: {str(e)}")
             raise ConfigError(f"配置文件解析错误: {str(e)}")
             
+        # 加载开场白
+        self.opening_speech = self.tool_config.get("开场白", "")
+        
         # 加载频道管理AI
         self.channel_manager_ai = self.tool_config.get("频道管理AI")
         if self.channel_manager_ai and self.channel_manager_ai not in self.tool_config["AI"]:
@@ -257,12 +263,18 @@ class MultiAIChatSystem:
         except Exception as e:
             print(f"写入日志文件失败: {str(e)}")
 
-    def log_message(self, channel, ai_id, message):
-        """记录消息到日志"""
+    def log_message(self, channel, ai_id, message, combined_channels=None):
+        """记录消息到日志，支持合并频道显示"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_entry = f"[{channel}][{timestamp}] {ai_id}: {message}"
         
-        # 添加到频道日志
+        # 如果提供了合并频道列表，则使用合并格式
+        if combined_channels:
+            channel_str = ''.join(f"[{ch}]" for ch in combined_channels)
+            log_entry = f"[{channel_str}][{timestamp}] {ai_id}: {message}"
+        else:
+            log_entry = f"[{channel}][{timestamp}] {ai_id}: {message}"
+        
+        # 添加到频道日志 - 仍然按原始频道添加
         if channel in self.channel_logs:
             self.channel_logs[channel].append(log_entry)
         
@@ -283,8 +295,13 @@ class MultiAIChatSystem:
             color = Color.MAGENTA
         elif channel == "管理":
             color = Color.GREEN
-            
-        print(f"{Color.YELLOW}[{channel}]{Color.RESET}{Color.RED}{ai_id}:{Color.RESET}{color} {message}{Color.RESET}")
+        
+        # 终端输出使用合并的频道显示
+        if combined_channels:
+            channel_display = ''.join(f"{Color.YELLOW}[{ch}]{Color.RESET}" for ch in combined_channels)
+            print(f"{channel_display}{Color.RED}{ai_id}:{Color.RESET}{color} {message}{Color.RESET}")
+        else:
+            print(f"{Color.YELLOW}[{channel}]{Color.RESET}{Color.RED}{ai_id}:{Color.RESET}{color} {message}{Color.RESET}")
     
     def log_rejection(self, speaker_id, reason, message):
         """记录驳回消息（不广播到任何频道）"""
@@ -322,6 +339,11 @@ class MultiAIChatSystem:
             
         speaker_id = random.choice(eligible)
         self.last_speaker = speaker_id
+        
+        # 如果是第一个发言的AI，记录下来
+        if not self.first_ai_id:
+            self.first_ai_id = speaker_id
+            
         return speaker_id
 
     def get_eligible_speakers(self):
@@ -373,7 +395,7 @@ class MultiAIChatSystem:
         # 格式1: [频道]消息
         single_match = re.match(r"^\[([^\]]+)\](.+)$", message)
         if single_match:
-            return [(single_match.group(1), single_match.group(2))]
+            return [(single_match.group(1), single_match.group(2)]
         
         # 格式2: [频道1][频道2]消息
         multi_match = re.match(r"^(\[[^\]]+\])+(.+)$", message)
@@ -455,6 +477,9 @@ class MultiAIChatSystem:
 
     def distribute_message(self, speaker_id, parsed_messages):
         """分发消息到各个频道和AI"""
+        # 分组相同内容的消息（用于合并频道显示）
+        content_to_channels = defaultdict(list)
+        
         for channel, content in parsed_messages:
             # 验证发送权限
             if channel not in self.tool_config["AI"][speaker_id] or "发送" not in self.tool_config["AI"][speaker_id][channel]:
@@ -473,7 +498,8 @@ class MultiAIChatSystem:
             
             # 如果消息内容不为空，记录到频道
             if cleaned_content:
-                self.log_message(channel, speaker_id, cleaned_content)
+                # 收集相同内容的频道
+                content_to_channels[cleaned_content].append(channel)
                 
                 # 添加到接收者的记忆
                 for ai_id, ai_config in self.tool_config["AI"].items():
@@ -483,6 +509,12 @@ class MultiAIChatSystem:
                             "role": role,
                             "content": f"[{channel}] {cleaned_content}"
                         })
+        
+        # 记录日志，合并相同内容的频道
+        for content, channels in content_to_channels.items():
+            # 对频道进行排序以确保一致性
+            channels_sorted = sorted(channels)
+            self.log_message(channels_sorted[0], speaker_id, content, combined_channels=channels_sorted)
 
     def rotate_prompts(self):
         """轮换提示词（支持提示词再生机制）"""
@@ -672,7 +704,8 @@ class MultiAIChatSystem:
                 "last_observation": self.last_observation,
                 "start_time": self.start_time,
                 "priority_queue": list(self.priority_queue),
-                "pending_commands": self.pending_commands
+                "pending_commands": self.pending_commands,
+                "first_ai_id": self.first_ai_id
             }
             with open(state_file, "w", encoding="utf-8") as f:
                 json.dump(state, f)
@@ -919,6 +952,13 @@ class MultiAIChatSystem:
             self.log_message("系统", "管理员", f"随机选择排除的AI: {', '.join(self.excluded_ais) or '无'}")
             self.log_message("系统", "管理员", f"提示词生成AI数量: {len(self.prompt_generators)}")
             
+            # 初始化AI记忆
+            for ai_id, ai_config in self.tool_config["AI"].items():
+                self.ai_memories[ai_id] = [{
+                    "role": "system",
+                    "content": ai_config.get("prompt", "你是一个AI助手")
+                }]
+            
             while True:
                 self.round_count += 1
                 
@@ -929,6 +969,17 @@ class MultiAIChatSystem:
                     continue
                 
                 try:
+                    # 如果是第一个发言的AI且没有记忆，添加开场白
+                    if not self.first_ai_spoken and self.opening_speech:
+                        # 只对第一个发言的AI添加开场白
+                        if speaker_id == self.first_ai_id:
+                            self.log_message("系统", "管理员", f"向第一个AI {speaker_id} 添加开场白")
+                            self.ai_memories[speaker_id].append({
+                                "role": "user",
+                                "content": self.opening_speech
+                            })
+                        self.first_ai_spoken = True
+                    
                     # 2. 生成消息
                     api_index = self.tool_config["AI"][speaker_id]["api"]
                     updated_session, response = run_chat_session(
