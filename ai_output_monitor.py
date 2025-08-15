@@ -1,11 +1,11 @@
 import os
 import sys
 import time
-import re
 
 def tail_ai_output(log_file):
     """
     实时读取AI输出日志文件并仅输出AI内容部分
+    启动时输出文件的全部内容，然后监控新增内容
     
     参数:
         log_file: 日志文件路径
@@ -15,7 +15,29 @@ def tail_ai_output(log_file):
         print(f"日志文件不存在: {log_file}")
         sys.exit(1)
     
-    # 获取当前文件大小（只读取新内容）
+    # 首先输出文件的全部内容
+    print("=== 历史输出开始 ===")
+    try:
+        with open(log_file, 'r', encoding='utf-8') as f:
+            # 读取并输出所有内容
+            for line in f:
+                # 解析日志行格式: timestamp - model - provider - content - streaming
+                parts = line.strip().split(' - ', 4)  # 最多分割4次
+                
+                # 确保有足够的部分（至少5部分）
+                if len(parts) >= 5:
+                    # 获取内容部分（索引3）
+                    content = parts[3]
+                    # 输出内容
+                    print(content, end='', flush=True)
+    
+    except Exception as e:
+        print(f"\n读取历史输出时出错: {str(e)}")
+    
+    print("\n=== 历史输出结束 ===")
+    print("开始实时监控...\n")
+    
+    # 获取当前文件大小（准备监控新增内容）
     last_size = os.path.getsize(log_file)
     
     try:
@@ -38,13 +60,13 @@ def tail_ai_output(log_file):
                         lines = f.readlines()
                         for line in lines:
                             # 解析日志行格式: timestamp - model - provider - content - streaming
-                            parts = line.strip().split(' - ', 4)  # 只分割4次
+                            parts = line.strip().split(' - ', 4)  # 最多分割4次
                             
                             # 确保有足够的部分
                             if len(parts) >= 5:
                                 # 获取内容部分（索引3）
                                 content = parts[3]
-                                # 输出内容（不换行，因为print会自动添加）
+                                # 输出内容（不换行）
                                 print(content, end='', flush=True)
                         
                         # 更新最后位置
