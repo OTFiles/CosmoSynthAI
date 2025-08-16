@@ -58,7 +58,7 @@ def _write_ai_log(entry):
         streaming = "true" if entry.get("streaming", False) else "false"
         
         # 替换换行符为空格以保持单行格式
-        content = content.replace('\n', ' ').replace('\r', ' ')
+        content = content.replace('\n', '\\n').replace('\r', '\\r')
         
         # 构建日志行
         log_line = f"{timestamp} - {model} - {provider} - {content} - {streaming}\n"
