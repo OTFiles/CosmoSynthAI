@@ -307,33 +307,38 @@ def _send_openai_request(config, messages):
     logger.info(f"发送OpenAI请求到 {config.api_base} (模型: {config.model})")
     
     try:
-        response = openai.ChatCompletion.create(
+        # 使用新版OpenAI客户端
+        client = openai.OpenAI(
+            base_url=config.api_base,
+            api_key=config.api_key,
+            timeout=30.0,
+            default_headers=config.headers
+        )
+        
+        # 创建流式响应
+        stream = client.chat.completions.create(
             model=config.model,
             messages=messages,
-            stream=True,
-            api_base=config.api_base,
-            api_key=config.api_key,
-            headers=config.headers
+            stream=True
         )
         
         logger.debug("开始接收流式响应...")
         
-        for chunk in response:
-            if 'choices' in chunk and len(chunk['choices']) > 0:
-                choice = chunk['choices'][0]
-                if 'delta' in choice and 'content' in choice['delta']:
-                    content = choice['delta']['content']
-                    # 空值检查
-                    if content is None:
-                        content = ""
+        # 处理流式响应
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                content = chunk.choices[0].delta.content
+                # 空值检查
+                if content is None:
+                    content = ""
                     
-                    full_response += content
-                    
-                    # 记录流式输出到AI日志
-                    try:
-                        _log_ai_output(config, content)
-                    except Exception as e:
-                        logger.error(f"记录流式输出失败: {str(e)}")
+                full_response += content
+                
+                # 记录流式输出到AI日志
+                try:
+                    _log_ai_output(config, content)
+                except Exception as e:
+                    logger.error(f"记录流式输出失败: {str(e)}")
         
         if not full_response:
             logger.warning("AI未返回有效响应")
@@ -342,9 +347,12 @@ def _send_openai_request(config, messages):
         logger.info(f"成功接收响应: {len(full_response)} 字符")
         return full_response
     
-    except openai.error.APIError as e:
+    except openai.APIError as e:
         logger.error(f"OpenAI API错误: {str(e)}")
         raise APIConnectionError(f"API错误: {str(e)}")
+    except openai.APIConnectionError as e:
+        logger.error(f"OpenAI连接错误: {str(e)}")
+        raise APIConnectionError(f"连接错误: {str(e)}")
     except Exception as e:
         logger.error(f"OpenAI请求错误: {str(e)}")
         raise APIConnectionError(f"请求错误: {str(e)}")
