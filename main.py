@@ -694,7 +694,7 @@ class MultiAIChatSystem:
             # 保存频道日志
             for channel, logs in self.channel_logs.items():
                 if isinstance(logs, list):
-                    channel_log_file = os.path.join(logs_dir, f"{channel}_log.txt")
+                    channel_log_file = os.path.join(logs_dir, f"{channel}_log.txt").replace('/', '_')
                     with open(channel_log_file, "a", encoding="utf-8") as f:
                         f.write("\n".join(logs[-10:]) + "\n")
             
