@@ -1,5 +1,6 @@
 config.txt
 api-config.txt
+api-config.json
 config.json
 chat_history/*
 __pycache__/*
