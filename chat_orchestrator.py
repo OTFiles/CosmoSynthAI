@@ -8,7 +8,7 @@ from logging_system import UnifiedLogger, LogType
 from configuration_manager import ConfigurationManager
 from message_processor import MessageProcessor, ParsedMessage
 from prompt_manager import PromptManager
-from chat_core import ToolCallbacks
+from chat_core import ToolCallbacks, APIConnectionError
 
 @dataclass
 class PriorityTask:
@@ -39,6 +39,11 @@ class ChatOrchestrator:
         self.first_ai_id: Optional[str] = None
         self.first_ai_spoken = False
         
+        # 验证配置是否已加载
+        if not hasattr(self.config_manager, 'ai_configs') or not self.config_manager.ai_configs:
+            self.logger.error("配置管理器中的AI配置为空，无法初始化协调器")
+            raise ValueError("AI配置为空，请先加载配置")
+        
         # 初始化工具调用系统
         self._initialize_tool_system()
         
@@ -57,7 +62,7 @@ class ChatOrchestrator:
         
         # 设置工具回调到ChatCore
         self.chat_core.set_tool_callbacks(self.tool_callbacks)
-    
+        
     def _register_tools(self) -> None:
         """注册所有可用的工具"""
         # 呼叫AI工具
@@ -203,6 +208,8 @@ class ChatOrchestrator:
         self.tool_callbacks.register_tool(add_to_channel_schema, self._tool_add_to_channel)
         self.tool_callbacks.register_tool(remove_from_channel_schema, self._tool_remove_from_channel)
         self.tool_callbacks.register_tool(reset_memory_schema, self._tool_reset_memory)
+        
+        self.logger.info(f"已注册 {len(self.tool_callbacks.tool_schemas)} 个工具")
     
     def _tool_call_ai(self, ai_name: str, reason: str = "被呼叫") -> str:
         """工具：呼叫AI"""
@@ -313,8 +320,10 @@ class ChatOrchestrator:
                     "role": "system", 
                     "content": ai_config.prompt
                 }]
+            self.logger.info(f"成功初始化 {len(self.ai_memories)} 个AI的记忆")
         else:
-            self.logger.warning("配置管理器中的AI配置为空，无法初始化记忆")
+            self.logger.error("配置管理器中的AI配置为空，无法初始化记忆")
+            raise ValueError("AI配置为空，请先加载配置")
 
     def get_next_speaker(self) -> Optional[str]:
         """获取下一个发言的AI（考虑优先级队列）"""
@@ -371,7 +380,7 @@ class ChatOrchestrator:
         """添加优先级任务"""
         task = PriorityTask(priority=priority, ai_id=ai_id, reason=reason)
         self.priority_queue.append(task)
-    
+        
     def process_ai_turn(self, speaker_id: str) -> bool:
         """处理AI的发言回合"""
         try:
@@ -390,18 +399,40 @@ class ChatOrchestrator:
                 session = [{"role": "system", "content": ai_config.prompt}]
             
             # 使用工具调用功能运行会话
-            updated_session, response = self.chat_core.run_chat_session(
-                session, 
-                ai_config.api_index
-            )
-            
-            # 更新AI的记忆
-            self.ai_memories[speaker_id] = updated_session
-            
-            # 检查是否有工具调用结果需要处理
-            if self._has_tool_calls(updated_session):
-                self._process_tool_call_results(speaker_id, updated_session)
-                return True
+            try:
+                updated_session, response = self.chat_core.run_chat_session(
+                    session, 
+                    ai_config.api_index
+                )
+                
+                # 更新AI的记忆
+                self.ai_memories[speaker_id] = updated_session
+                
+                # 检查是否有工具调用结果需要处理
+                if self._has_tool_calls(updated_session):
+                    self._process_tool_call_results(speaker_id, updated_session)
+                    return True
+                
+            except APIConnectionError as e:
+                # 如果工具调用失败，回退到不使用工具的模式
+                self.logger.warning(f"工具调用失败，回退到普通模式: {str(e)}", ai_id=speaker_id)
+                
+                # 临时禁用工具调用
+                original_tool_callbacks = self.chat_core.tool_callbacks
+                self.chat_core.tool_callbacks = None
+                
+                try:
+                    updated_session, response = self.chat_core.run_chat_session(
+                        session, 
+                        ai_config.api_index
+                    )
+                    
+                    # 更新AI的记忆
+                    self.ai_memories[speaker_id] = updated_session
+                    
+                finally:
+                    # 恢复工具调用
+                    self.chat_core.tool_callbacks = original_tool_callbacks
             
             # 监察机制
             if not self.message_processor.monitor_message(speaker_id, response, self.chat_core):

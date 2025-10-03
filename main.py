@@ -17,21 +17,10 @@ class MultiAIChatSystem:
         
         self.config_manager = ConfigurationManager(self.logger)
         
-        # ChatCore 实例（保持原有功能）
-        self.chat_core = ChatCore("api-config.json", "logs")
+        # ChatCore 实例（保持原有功能）- 修复初始化参数
+        self.chat_core = ChatCore("api-config.json")
         
-        # 其他组件需要chat_core，所以先初始化chat_core
-        self.message_processor = MessageProcessor(self.config_manager, self.logger)
-        self.prompt_manager = PromptManager(self.config_manager, self.logger)
-        
-        # 协调器（不再需要CommandHandler）
-        self.orchestrator = ChatOrchestrator(
-            self.config_manager,
-            self.message_processor,
-            self.prompt_manager,
-            self.logger,
-            self.chat_core
-        )
+        # 先不初始化其他组件，等配置加载后再初始化
     
     def run(self):
         """运行系统"""
@@ -39,6 +28,19 @@ class MultiAIChatSystem:
             # 加载配置
             self.config_manager.load_api_config("api-config.json")
             self.config_manager.load_tool_config("config.json")
+            
+            # 在配置加载后初始化其他组件
+            self.message_processor = MessageProcessor(self.config_manager, self.logger)
+            self.prompt_manager = PromptManager(self.config_manager, self.logger)
+            
+            # 协调器（在配置加载后初始化）
+            self.orchestrator = ChatOrchestrator(
+                self.config_manager,
+                self.message_processor,
+                self.prompt_manager,
+                self.logger,
+                self.chat_core
+            )
             
             # 运行主循环
             self.orchestrator.run_main_loop()
