@@ -1,14 +1,14 @@
-# chat_orchestrator.py
 import time
 import random
+import json
 from collections import deque
-from typing import Dict, List, Optional, Deque, Tuple, Any
+from typing import Dict, List, Optional, Deque, Tuple, Any, Callable
 from dataclasses import dataclass
 from logging_system import UnifiedLogger, LogType
 from configuration_manager import ConfigurationManager
 from message_processor import MessageProcessor, ParsedMessage
-from command_handler import CommandHandler, CommandResult
 from prompt_manager import PromptManager
+from chat_core import ToolCallbacks
 
 @dataclass
 class PriorityTask:
@@ -22,13 +22,11 @@ class ChatOrchestrator:
     
     def __init__(self, config_manager: ConfigurationManager, 
                  message_processor: MessageProcessor,
-                 command_handler: CommandHandler,
                  prompt_manager: PromptManager,
                  logger: UnifiedLogger,
                  chat_core: Any):
         self.config_manager = config_manager
         self.message_processor = message_processor
-        self.command_handler = command_handler
         self.prompt_manager = prompt_manager
         self.logger = logger
         self.chat_core = chat_core
@@ -41,12 +39,271 @@ class ChatOrchestrator:
         self.first_ai_id: Optional[str] = None
         self.first_ai_spoken = False
         
+        # 初始化工具调用系统
+        self._initialize_tool_system()
+        
         # 在构造函数中初始化AI记忆
         self._initialize_ai_memories()
         
         # 记录初始化完成
         self.logger.info(f"聊天协调器初始化完成，共初始化 {len(self.ai_memories)} 个AI的记忆")
+    
+    def _initialize_tool_system(self) -> None:
+        """初始化工具调用系统"""
+        self.tool_callbacks = ToolCallbacks()
         
+        # 注册工具函数
+        self._register_tools()
+        
+        # 设置工具回调到ChatCore
+        self.chat_core.set_tool_callbacks(self.tool_callbacks)
+    
+    def _register_tools(self) -> None:
+        """注册所有可用的工具"""
+        # 呼叫AI工具
+        call_ai_schema = {
+            "type": "function",
+            "function": {
+                "name": "call_ai",
+                "description": "呼叫指定的AI，使其在下一轮优先发言",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ai_name": {
+                            "type": "string",
+                            "description": "要呼叫的AI名称"
+                        },
+                        "reason": {
+                            "type": "string", 
+                            "description": "呼叫的原因"
+                        }
+                    },
+                    "required": ["ai_name"]
+                }
+            }
+        }
+        
+        # 频道管理工具
+        channel_list_schema = {
+            "type": "function",
+            "function": {
+                "name": "list_channel_members",
+                "description": "列出指定频道的所有成员及其权限",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "channel_name": {
+                            "type": "string",
+                            "description": "频道名称"
+                        }
+                    },
+                    "required": ["channel_name"]
+                }
+            }
+        }
+        
+        set_permissions_schema = {
+            "type": "function",
+            "function": {
+                "name": "set_channel_permissions",
+                "description": "设置AI在指定频道的权限",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "channel_name": {
+                            "type": "string",
+                            "description": "频道名称"
+                        },
+                        "ai_name": {
+                            "type": "string",
+                            "description": "AI名称"
+                        },
+                        "permissions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "权限列表，如['send', 'receive']"
+                        }
+                    },
+                    "required": ["channel_name", "ai_name", "permissions"]
+                }
+            }
+        }
+        
+        add_to_channel_schema = {
+            "type": "function",
+            "function": {
+                "name": "add_ai_to_channel",
+                "description": "将AI添加到指定频道",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "channel_name": {
+                            "type": "string",
+                            "description": "频道名称"
+                        },
+                        "ai_name": {
+                            "type": "string",
+                            "description": "要添加的AI名称"
+                        }
+                    },
+                    "required": ["channel_name", "ai_name"]
+                }
+            }
+        }
+        
+        remove_from_channel_schema = {
+            "type": "function",
+            "function": {
+                "name": "remove_ai_from_channel",
+                "description": "从指定频道移除AI",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "channel_name": {
+                            "type": "string",
+                            "description": "频道名称"
+                        },
+                        "ai_name": {
+                            "type": "string",
+                            "description": "要移除的AI名称"
+                        }
+                    },
+                    "required": ["channel_name", "ai_name"]
+                }
+            }
+        }
+        
+        # 记忆管理工具
+        reset_memory_schema = {
+            "type": "function",
+            "function": {
+                "name": "reset_ai_memory",
+                "description": "重置指定AI的记忆",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ai_name": {
+                            "type": "string",
+                            "description": "要重置记忆的AI名称"
+                        },
+                        "use_history": {
+                            "type": "boolean",
+                            "description": "是否参考历史记录"
+                        }
+                    },
+                    "required": ["ai_name", "use_history"]
+                }
+            }
+        }
+        
+        # 注册工具
+        self.tool_callbacks.register_tool(call_ai_schema, self._tool_call_ai)
+        self.tool_callbacks.register_tool(channel_list_schema, self._tool_list_channel_members)
+        self.tool_callbacks.register_tool(set_permissions_schema, self._tool_set_permissions)
+        self.tool_callbacks.register_tool(add_to_channel_schema, self._tool_add_to_channel)
+        self.tool_callbacks.register_tool(remove_from_channel_schema, self._tool_remove_from_channel)
+        self.tool_callbacks.register_tool(reset_memory_schema, self._tool_reset_memory)
+    
+    def _tool_call_ai(self, ai_name: str, reason: str = "被呼叫") -> str:
+        """工具：呼叫AI"""
+        if ai_name not in self.config_manager.ai_configs:
+            return f"错误：找不到AI '{ai_name}'"
+        
+        if ai_name in self.config_manager.system_config.excluded_ais:
+            return f"错误：AI '{ai_name}' 在排除列表中，无法呼叫"
+        
+        # 添加到优先级队列
+        self.add_priority_task(ai_name, reason, "B")
+        return f"成功呼叫 {ai_name}，将在下次优先响应"
+    
+    def _tool_list_channel_members(self, channel_name: str) -> str:
+        """工具：列出频道成员"""
+        if channel_name not in self._get_all_channels():
+            return f"错误：频道 '{channel_name}' 不存在"
+        
+        members = []
+        for ai_id, ai_config in self.config_manager.ai_configs.items():
+            if channel_name in ai_config.channels:
+                permissions = ai_config.channels[channel_name]
+                members.append(f"{ai_id}: {permissions}")
+        
+        result = f"频道 '{channel_name}' 成员:\n" + "\n".join(members) if members else f"频道 '{channel_name}' 无成员"
+        return result
+    
+    def _tool_set_permissions(self, channel_name: str, ai_name: str, permissions: List[str]) -> str:
+        """工具：设置频道权限"""
+        if channel_name not in self._get_all_channels():
+            return f"错误：频道 '{channel_name}' 不存在"
+        
+        if ai_name not in self.config_manager.ai_configs:
+            return f"错误：AI '{ai_name}' 未定义"
+        
+        # 验证权限值是否有效
+        valid_perms = ["receive", "send"]
+        for perm in permissions:
+            if perm not in valid_perms:
+                return f"错误：无效权限 '{perm}'，有效值为 {valid_perms}"
+        
+        # 更新权限
+        self.config_manager.ai_configs[ai_name].channels[channel_name] = permissions
+        return f"成功设置 {ai_name} 在 '{channel_name}' 的权限为: {permissions}"
+    
+    def _tool_add_to_channel(self, channel_name: str, ai_name: str) -> str:
+        """工具：添加AI到频道"""
+        if channel_name not in self._get_all_channels():
+            return f"错误：频道 '{channel_name}' 不存在"
+        
+        if ai_name not in self.config_manager.ai_configs:
+            return f"错误：AI '{ai_name}' 未定义"
+        
+        if channel_name in self.config_manager.ai_configs[ai_name].channels:
+            return f"错误：{ai_name} 已在频道 '{channel_name}' 中"
+        
+        # 添加AI到频道（默认只接收）
+        self.config_manager.ai_configs[ai_name].channels[channel_name] = ["receive"]
+        return f"成功添加 {ai_name} 到频道 '{channel_name}'"
+    
+    def _tool_remove_from_channel(self, channel_name: str, ai_name: str) -> str:
+        """工具：从频道移除AI"""
+        if channel_name not in self._get_all_channels():
+            return f"错误：频道 '{channel_name}' 不存在"
+        
+        if ai_name not in self.config_manager.ai_configs:
+            return f"错误：AI '{ai_name}' 未定义"
+        
+        if channel_name not in self.config_manager.ai_configs[ai_name].channels:
+            return f"错误：{ai_name} 不在频道 '{channel_name}' 中"
+        
+        # 从频道移除AI
+        del self.config_manager.ai_configs[ai_name].channels[channel_name]
+        return f"成功从频道 '{channel_name}' 移除 {ai_name}"
+    
+    def _tool_reset_memory(self, ai_name: str, use_history: bool) -> str:
+        """工具：重置AI记忆"""
+        if ai_name not in self.config_manager.ai_configs:
+            return f"错误：AI '{ai_name}' 未定义"
+        
+        # 获取原始提示词
+        original_prompt = self.config_manager.ai_configs[ai_name].prompt
+        
+        # 如果使用历史记录
+        if use_history:
+            # 这里需要历史管理器，暂时简化处理
+            new_system = f"{original_prompt}\n\n记忆已被重置（包含历史参考）"
+        else:
+            new_system = f"{original_prompt}\n\n记忆已被重置"
+        
+        # 重置记忆
+        self.ai_memories[ai_name] = [{"role": "system", "content": new_system}]
+        return f"成功重置 {ai_name} 的记忆 (参考历史: {use_history})"
+    
+    def _get_all_channels(self) -> List[str]:
+        """获取所有频道列表"""
+        channels = set()
+        for ai_config in self.config_manager.ai_configs.values():
+            channels.update(ai_config.channels.keys())
+        return list(channels)
+
     def _initialize_ai_memories(self) -> None:
         """初始化AI记忆"""
         self.ai_memories.clear()
@@ -58,7 +315,7 @@ class ChatOrchestrator:
                 }]
         else:
             self.logger.warning("配置管理器中的AI配置为空，无法初始化记忆")
-    
+
     def get_next_speaker(self) -> Optional[str]:
         """获取下一个发言的AI（考虑优先级队列）"""
         # 首先检查优先级队列
@@ -132,6 +389,7 @@ class ChatOrchestrator:
             if not session:
                 session = [{"role": "system", "content": ai_config.prompt}]
             
+            # 使用工具调用功能运行会话
             updated_session, response = self.chat_core.run_chat_session(
                 session, 
                 ai_config.api_index
@@ -140,10 +398,9 @@ class ChatOrchestrator:
             # 更新AI的记忆
             self.ai_memories[speaker_id] = updated_session
             
-            # 处理特殊命令
-            command_result = self.command_handler.process_command(speaker_id, response)
-            if command_result and command_result.success:
-                self._handle_command_result(speaker_id, command_result)
+            # 检查是否有工具调用结果需要处理
+            if self._has_tool_calls(updated_session):
+                self._process_tool_call_results(speaker_id, updated_session)
                 return True
             
             # 监察机制
@@ -162,6 +419,28 @@ class ChatOrchestrator:
             self.logger.error(f"详细错误信息: {traceback.format_exc()}", ai_id=speaker_id)
             return False
     
+    def _has_tool_calls(self, session: List[Dict[str, Any]]) -> bool:
+        """检查会话中是否有工具调用"""
+        for message in session:
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                return True
+        return False
+    
+    def _process_tool_call_results(self, speaker_id: str, session: List[Dict[str, Any]]) -> None:
+        """处理工具调用结果"""
+        for message in session:
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                # 记录工具调用
+                for tool_call in message.get("tool_calls", []):
+                    function_name = tool_call.get("function", {}).get("name", "")
+                    self.logger.log_command(speaker_id, f"工具调用: {function_name}", "执行")
+                
+                # 检查是否有工具响应
+                next_message = session[session.index(message) + 1] if session.index(message) + 1 < len(session) else None
+                if next_message and next_message.get("role") == "tool":
+                    tool_response = next_message.get("content", "")
+                    self.logger.info(f"工具执行结果: {tool_response}", ai_id=speaker_id)
+    
     def _add_opening_speech(self, speaker_id: str) -> None:
         """添加开场白"""
         opening_speech = self.config_manager.system_config.opening_speech
@@ -170,17 +449,6 @@ class ChatOrchestrator:
             "role": "user",
             "content": opening_speech
         })
-    
-    def _handle_command_result(self, speaker_id: str, result: CommandResult) -> None:
-        """处理命令执行结果"""
-        # 记录命令执行结果
-        self.logger.info(result.message, ai_id=speaker_id, log_type=LogType.COMMAND)
-        
-        # 处理需要后续操作的情况
-        if result.requires_followup and result.followup_ai:
-            priority = "A" if speaker_id in [self.config_manager.system_config.channel_manager_ai,
-                                           self.config_manager.system_config.memory_manager_ai] else "B"
-            self.add_priority_task(result.followup_ai, f"命令后续操作", priority)
     
     def _distribute_message(self, speaker_id: str, parsed_message: ParsedMessage) -> None:
         """分发消息到各个频道和AI"""

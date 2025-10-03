@@ -5,7 +5,6 @@ from chat_core import ChatCore
 from logging_system import UnifiedLogger
 from configuration_manager import ConfigurationManager
 from message_processor import MessageProcessor
-from command_handler import CommandHandler
 from prompt_manager import PromptManager
 from chat_orchestrator import ChatOrchestrator
 
@@ -23,14 +22,12 @@ class MultiAIChatSystem:
         
         # 其他组件需要chat_core，所以先初始化chat_core
         self.message_processor = MessageProcessor(self.config_manager, self.logger)
-        self.command_handler = CommandHandler(self.config_manager, self.logger)
         self.prompt_manager = PromptManager(self.config_manager, self.logger)
         
-        # 协调器
+        # 协调器（不再需要CommandHandler）
         self.orchestrator = ChatOrchestrator(
             self.config_manager,
             self.message_processor,
-            self.command_handler,
             self.prompt_manager,
             self.logger,
             self.chat_core
@@ -42,21 +39,6 @@ class MultiAIChatSystem:
             # 加载配置
             self.config_manager.load_api_config("api-config.json")
             self.config_manager.load_tool_config("config.json")
-            
-            # 初始化其他组件（需要先加载配置）
-            self.message_processor = MessageProcessor(self.config_manager, self.logger)
-            self.command_handler = CommandHandler(self.config_manager, self.logger)
-            self.prompt_manager = PromptManager(self.config_manager, self.logger)
-            
-            # 协调器（在配置加载后初始化）
-            self.orchestrator = ChatOrchestrator(
-                self.config_manager,
-                self.message_processor,
-                self.command_handler,
-                self.prompt_manager,
-                self.logger,
-                self.chat_core
-            )
             
             # 运行主循环
             self.orchestrator.run_main_loop()

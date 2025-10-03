@@ -40,7 +40,12 @@ class ConfigurationManager:
         """加载API配置"""
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
-                self.api_configs = json.load(f)
+                config_data = json.load(f)
+                # 适配新的ChatCore配置格式
+                if "configs" in config_data:
+                    self.api_configs = config_data["configs"]
+                else:
+                    self.api_configs = config_data
             self.logger.info(f"成功加载API配置，共 {len(self.api_configs)} 个API")
         except Exception as e:
             self.logger.error(f"加载API配置失败: {str(e)}")
